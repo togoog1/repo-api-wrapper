@@ -51,6 +51,8 @@ Edit `my-service.ts` with your service's slug, base URLs, auth config, and endpo
 
 Files in `src/config/modules/` without a leading `_` are gitignored, so local module configs stay on your machine.
 
+You can also skip the manual copy step: after the app starts, use the import button in the top-left of the dashboard with a Postman collection export, and the app will generate the module config file for you on the fly.
+
 ### 4. Create the database and start the app
 
 ```bash
