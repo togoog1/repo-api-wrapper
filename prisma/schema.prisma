@@ -1,0 +1,189 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+enum RunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  STOPPED
+  FAILED
+}
+
+enum RunItemStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  STOPPED
+}
+
+enum AttemptStatus {
+  SUCCEEDED
+  FAILED
+}
+
+
+model Run {
+  id                 String      @id @default(cuid())
+  slug               String?     @unique
+  label              String?
+  serviceName        String?
+  action             String
+  moduleSlug         String?
+  templateSlug       String?
+  moduleDefinitionId String?
+  runTemplateId      String?
+  inputListId        String?
+  status             RunStatus   @default(PENDING)
+  config             Json
+  totalItems         Int         @default(0)
+  completedItems     Int         @default(0)
+  succeededItems     Int         @default(0)
+  failedItems        Int         @default(0)
+  stopRequestedAt DateTime?
+  stopReason         String?
+  startedAt          DateTime?
+  finishedAt         DateTime?
+  lastError          String?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+  moduleDefinition ModuleDefinition? @relation(fields: [moduleDefinitionId], references: [id], onDelete: SetNull)
+  runTemplate        RunTemplate? @relation(fields: [runTemplateId], references: [id], onDelete: SetNull)
+  inputList          SavedInputList? @relation("RunInputList", fields: [inputListId], references: [id], onDelete: SetNull)
+  sourceFailureLists SavedInputList[] @relation("FailureSourceRun")
+  items              RunItem[]
+  attempts           Attempt[]
+  events             EventLog[]
+
+  @@index([status, createdAt])
+  @@index([moduleSlug, createdAt])
+  @@index([templateSlug, createdAt])
+  @@index([inputListId, createdAt])
+}
+
+model RunItem {
+  id             String        @id @default(cuid())
+  runId          String
+  sequence       Int
+  masterId       Int
+  status         RunItemStatus @default(PENDING)
+  attemptCount   Int           @default(0)
+  lastHttpStatus Int?
+  lastError      String?
+  request        Json?
+  response       Json?
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  run            Run           @relation(fields: [runId], references: [id], onDelete: Cascade)
+  attempts       Attempt[]
+  events         EventLog[]
+
+  @@unique([runId, sequence])
+  @@index([runId, status])
+  @@index([runId, masterId])
+}
+
+model Attempt {
+  id            String        @id @default(cuid())
+  runId         String
+  runItemId     String
+  attemptNumber Int
+  status        AttemptStatus
+  httpStatus    Int?
+  durationMs    Int?
+  request       Json?
+  response      Json?
+  error         String?
+  createdAt     DateTime      @default(now())
+  run           Run           @relation(fields: [runId], references: [id], onDelete: Cascade)
+  runItem       RunItem       @relation(fields: [runItemId], references: [id], onDelete: Cascade)
+
+  @@unique([runItemId, attemptNumber])
+  @@index([runId, createdAt])
+}
+
+model EventLog {
+  id        String   @id @default(cuid())
+  runId     String
+  runSlug   String?
+  moduleSlug String?
+  templateSlug String?
+  runItemId String?
+  level     String
+  eventType String
+  message   String
+  data      Json?
+  createdAt DateTime @default(now())
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  runItem   RunItem? @relation(fields: [runItemId], references: [id], onDelete: Cascade)
+
+  @@index([runId, createdAt])
+  @@index([runSlug, createdAt])
+  @@index([moduleSlug, createdAt])
+  @@index([runItemId, createdAt])
+}
+
+model ModuleDefinition {
+  id                       String        @id @default(cuid())
+  slug                     String        @unique
+  serviceName              String
+  action                   String
+  label                    String
+  description              String?
+  defaultTargetEnvironment String
+  defaultPathTemplate      String
+  defaultRunLabel          String?
+  defaultRunConfig         Json?
+  isEnabled                Boolean       @default(true)
+  createdAt                DateTime      @default(now())
+  updatedAt                DateTime      @updatedAt
+  runTemplates             RunTemplate[]
+  runs                     Run[]
+
+  @@index([serviceName, action, isEnabled])
+}
+
+model RunTemplate {
+  id                 String           @id @default(cuid())
+  moduleDefinitionId String
+  slug               String           @unique
+  label              String
+  description        String?
+  config             Json
+  isEnabled          Boolean          @default(true)
+  isDefault          Boolean          @default(false)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  moduleDefinition   ModuleDefinition @relation(fields: [moduleDefinitionId], references: [id], onDelete: Cascade)
+  runs               Run[]
+
+  @@index([moduleDefinitionId, isEnabled, isDefault])
+}
+
+model SavedInputList {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  label       String
+  description String?
+  moduleSlug  String?
+  itemType    String
+  data        Json
+  itemCount   Int
+  sourceRunId String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  runs        Run[]    @relation("RunInputList")
+  sourceRun   Run?     @relation("FailureSourceRun", fields: [sourceRunId], references: [id], onDelete: SetNull)
+
+  @@index([moduleSlug, createdAt])
+  @@index([sourceRunId, createdAt])
+}
+

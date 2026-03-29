@@ -1,0 +1,17 @@
+node_modules
+dist
+.env
+.env.*
+!.env.example
+.claude/
+.DS_Store
+prisma/dev.db
+prisma/dev.db-journal
+local-dev/gbpa-sync/logs/*.json
+src/generated/prisma
+
+# Module configs — drop .ts files in src/config/modules/ and they're
+# auto-discovered at startup. Files starting with _ are skipped by the
+# loader and tracked in git (e.g. _example-module.ts).
+src/config/modules/*.ts
+!src/config/modules/_*

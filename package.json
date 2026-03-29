@@ -1,0 +1,51 @@
+{
+  "name": "repo-api-wrapper",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "yarn@1.22.22",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && vite build --config web/vite.config.ts",
+    "dev": "node --env-file=.env --import tsx src/server.ts & vite --config web/vite.config.ts",
+    "dev:api": "node --env-file=.env --import tsx src/server.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "cli": "node --env-file=.env --import tsx src/cli.ts",
+    "prisma:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "serve": "node dist/server.js",
+    "sync:onboarding": "yarn cli sync-onboarding",
+    "auth:token": "yarn cli print-auth-token",
+    "run:resume": "yarn cli resume",
+    "run:stop": "yarn cli stop",
+    "run:report": "yarn cli report",
+    "run:list": "yarn cli list-runs"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.1.0",
+    "@fastify/static": "^8.3.0",
+    "@prisma/adapter-better-sqlite3": "^7.5.0",
+    "@prisma/client": "^7.5.0",
+    "bottleneck": "^2.19.5",
+    "commander": "^14.0.0",
+    "dotenv": "^17.0.0",
+    "fastify": "^5.6.1",
+    "jose": "^6.1.0",
+    "pino": "^9.0.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.2",
+    "prisma": "^7.5.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vite": "^7.1.3"
+  }
+}
