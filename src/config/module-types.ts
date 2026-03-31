@@ -8,7 +8,6 @@ export interface ModuleAuthDefinition {
   mode: "jwt" | "apikey" | "bearer" | "none";
   // JWT mode
   secretEnvVar?: string;
-  legacySecretEnvVar?: string;
   secretEnvVarByEnvironment?: Partial<Record<TargetEnvironment, string>>;
   jwt?: {
     email: string;
@@ -52,5 +51,7 @@ export interface ModuleDefinition {
   environments: Record<TargetEnvironment, ModuleEnvironmentDefinition>;
   auth: ModuleAuthDefinition;
   defaultHeaders?: Record<string, string>;
+  variables?: Record<string, string>;
+  customFolders?: string[][];
   endpoints: ModuleEndpointDefinition[];
 }

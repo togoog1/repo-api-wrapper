@@ -1,550 +1,22 @@
-import { FormEvent, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
-
-type RunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "STOPPED" | "FAILED";
-type RunItemStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "STOPPED";
-type TargetEnvironment = "staging" | "prod";
-
-interface Tab {
-  id: string;
-  endpointSlug: string;
-  moduleSlug: string;
-  method: string;
-  label: string;
-  pinned: boolean;
-}
-
-interface RunSummary {
-  id: string;
-  slug: string | null;
-  label: string | null;
-  serviceName: string | null;
-  action: string;
-  moduleSlug: string | null;
-  templateSlug: string | null;
-  inputListId: string | null;
-  status: RunStatus;
-  totalItems: number;
-  completedItems: number;
-  succeededItems: number;
-  failedItems: number;
-  stopReason: string | null;
-  createdAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-}
-
-interface RunEvent {
-  id: string;
-  runItemId: string | null;
-  level: string;
-  eventType: string;
-  message: string;
-  data: unknown;
-  createdAt: string;
-}
-
-interface RunItem {
-  id: string;
-  sequence: number;
-  itemValue: string;
-  status: RunItemStatus;
-  attemptCount: number;
-  lastHttpStatus: number | null;
-  lastError: string | null;
-  request: unknown;
-  startedAt: string | null;
-  finishedAt: string | null;
-  response: unknown;
-}
-
-interface RunDetail extends RunSummary {
-  config: Record<string, unknown>;
-  stopRequestedAt: string | null;
-  lastError: string | null;
-  updatedAt: string;
-  itemStatusBreakdown: Array<{ status: RunItemStatus; count: number }>;
-  recentFailures: Array<{
-    id: string;
-    sequence: number;
-    itemValue: string;
-    attemptCount: number;
-    lastHttpStatus: number | null;
-    lastError: string | null;
-    finishedAt: string | null;
-  }>;
-  recentEvents: RunEvent[];
-}
-
-interface QueryParamRow {
-  key: string;
-  value: string;
-}
-
-interface CreateRunFormState {
-  moduleSlug: string;
-  endpointSlug: string;
-  inputListId: string;
-  label: string;
-  idsRaw: string;
-  tokenValues: Record<string, string>;
-  targetEnvironment: TargetEnvironment;
-  method: string;
-  pathTemplate: string;
-  queryParams: QueryParamRow[];
-  headers: QueryParamRow[];
-  bodyType: "none" | "json" | "form" | "multipart" | "text";
-  requestBodyRaw: string;
-  formBodyRows: QueryParamRow[];
-  dryRun: boolean;
-  concurrency: number;
-  minDelayMs: number;
-  maxRequestsPerMinute: string;
-  maxRetries: number;
-  retryDelayMs: number;
-  stopAfterFailures: string;
-  stopAfterConsecutiveFailures: string;
-  stopOnHttpStatuses: string;
-  skipAuth: boolean;
-  disabledDefaultHeaders: string[];
-}
-
-interface ModuleEndpointCatalog {
-  slug: string;
-  action: string;
-  label: string;
-  description: string;
-  method: string;
-  pathTemplate: string;
-  folder?: string[];
-  defaultHeaders?: Record<string, string>;
-  requestBodyDescription?: string;
-  notes?: string;
-  defaultRunLabel?: string;
-  defaultRunConfig?: Record<string, unknown> | null;
-}
-
-interface ModuleCatalog {
-  slug: string;
-  serviceName: string;
-  label: string;
-  description: string | null;
-  defaultTargetEnvironment: TargetEnvironment;
-  environments: Record<TargetEnvironment, { baseUrl: string }>;
-  auth: {
-    mode: "jwt" | "apikey" | "bearer" | "none";
-    jwt?: {
-      email: string;
-    };
-    apikey?: {
-      headerName: string;
-      valueEnvVar: string;
-    };
-    bearer?: {
-      tokenEnvVar: string;
-    };
-  };
-  defaultHeaders?: Record<string, string>;
-  endpoints: ModuleEndpointCatalog[];
-}
-
-interface RuntimeConfig {
-  defaultTargetEnvironment: TargetEnvironment;
-  availableTargetEnvironments: TargetEnvironment[];
-  authMode: "jwt" | "apikey" | "bearer" | "none" | "unconfigured";
-  jwtEmail: string | null;
-  serviceName: string;
-  tokenCacheStrategy: "memory";
-  targetBaseUrls: Record<TargetEnvironment, string>;
-  modules: ModuleCatalog[];
-}
-
-interface SavedInputList {
-  id: string;
-  slug: string;
-  label: string;
-  description: string | null;
-  moduleSlug: string | null;
-  itemType: string;
-  itemCount: number;
-  data: unknown;
-  sourceRunId: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-const defaultFormState: CreateRunFormState = {
-  moduleSlug: "",
-  endpointSlug: "",
-  inputListId: "",
-  label: "",
-  idsRaw: "",
-  tokenValues: {},
-  targetEnvironment: "staging",
-  method: "POST",
-  pathTemplate: "/:id",
-  queryParams: [{ key: "", value: "" }],
-  headers: [{ key: "", value: "" }],
-  bodyType: "json",
-  requestBodyRaw: "",
-  formBodyRows: [{ key: "", value: "" }],
-  dryRun: true,
-  concurrency: 1,
-  minDelayMs: 250,
-  maxRequestsPerMinute: "",
-  maxRetries: 1,
-  retryDelayMs: 1500,
-  stopAfterFailures: "",
-  stopAfterConsecutiveFailures: "",
-  stopOnHttpStatuses: "401,403",
-  skipAuth: false,
-  disabledDefaultHeaders: [],
-};
-
-/* ── Helpers ──────────────────────────────────────────────────────── */
-
-function formatDate(value: string | null): string {
-  if (!value) return "Not set";
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(
-    new Date(value)
-  );
-}
-
-function formatRuntime(startedAt: string | null, finishedAt: string | null): string {
-  if (!startedAt) return "Waiting";
-  const start = new Date(startedAt).getTime();
-  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
-  const seconds = Math.max(0, Math.round((end - start) / 1000));
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return minutes === 0 ? `${remainder}s` : `${minutes}m ${remainder}s`;
-}
-
-function extractAllPathTokens(pathTemplate: string): string[] {
-  const matches = pathTemplate.match(/:[a-z][a-z0-9_]*|\{[a-z][a-z0-9_]*\}/giu) ?? [];
-  return [...new Set(matches.map((m) => m.replace(/^[:{]|\}$/gu, "")))];
-}
-
-function parseIdList(raw: string): string[] {
-  return raw.split(/[\s,]+/u).map((v) => v.trim()).filter(Boolean);
-}
-
-function applyEnvVars(template: string, vars: QueryParamRow[]): string {
-  return vars
-    .filter((v) => v.key.trim())
-    .reduce((s, v) => s.replaceAll(`{{${v.key.trim()}}}`, v.value), template);
-}
-
-interface ParsedItemResponse {
-  body: unknown;
-  headers: Record<string, string>;
-  size: number | null;
-}
-
-function parseItemResponse(raw: unknown): ParsedItemResponse {
-  if (
-    raw &&
-    typeof raw === "object" &&
-    !Array.isArray(raw) &&
-    ("body" in raw || "headers" in raw)
-  ) {
-    const r = raw as Record<string, unknown>;
-    return {
-      body: r.body,
-      headers: (r.headers as Record<string, string>) ?? {},
-      size: typeof r.size === "number" ? r.size : null,
-    };
-  }
-  return { body: raw, headers: {}, size: null };
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function syntaxHighlightJson(value: unknown): string {
-  if (typeof value === "string" && !value.startsWith("{") && !value.startsWith("[")) {
-    return `<span class="json-str">${escapeHtml(value)}</span>`;
-  }
-  let json: string;
-  try {
-    json = JSON.stringify(value, null, 2);
-  } catch {
-    return escapeHtml(String(value));
-  }
-  return json.replace(
-    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
-    (match) => {
-      let cls = "json-num";
-      if (/^"/.test(match)) {
-        cls = /:$/.test(match) ? "json-key" : "json-str";
-      } else if (/true|false/.test(match)) {
-        cls = "json-bool";
-      } else if (/null/.test(match)) {
-        cls = "json-null";
-      }
-      return `<span class="${cls}">${match}</span>`;
-    }
-  );
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function buildPreviewUrl(input: {
-  baseUrl?: string;
-  pathTemplate: string;
-  idsRaw: string;
-  tokenValues?: Record<string, string>;
-  queryParams?: QueryParamRow[];
-  envVars?: QueryParamRow[];
-}): string {
-  const ev = input.envVars ?? [];
-  const rawPath = applyEnvVars(input.pathTemplate.trim(), ev);
-  const normalizedPath = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
-  const tokens = extractAllPathTokens(normalizedPath);
-  const tv = input.tokenValues ?? {};
-
-  let resolved: string;
-  if (tokens.length > 1) {
-    // Multi-token: substitute each token individually from tokenValues
-    resolved = normalizedPath.replace(/:[a-z][a-z0-9_]*|\{[a-z][a-z0-9_]*\}/giu, (match) => {
-      const name = match.replace(/^[:{]|\}$/gu, "");
-      const sample = parseIdList(tv[name] ?? "")[0] ?? name;
-      return sample;
-    });
-  } else {
-    const sampleId = parseIdList(input.idsRaw)[0] ?? "12345";
-    resolved = normalizedPath.replace(/:[a-z][a-z0-9_]*|\{[a-z][a-z0-9_]*\}/giu, String(sampleId));
-  }
-
-  const activeParams = (input.queryParams ?? []).filter((p) => p.key.trim());
-  try {
-    const url = new URL(resolved, input.baseUrl ?? "http://x");
-    for (const { key, value } of activeParams) {
-      url.searchParams.append(key.trim(), applyEnvVars(value, ev));
-    }
-    return input.baseUrl ? url.toString() : url.pathname + url.search;
-  } catch {
-    return resolved;
-  }
-}
-
-function formatStructuredValue(value: unknown): string {
-  if (value === null || value === undefined) return "No data";
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function formatConfigValue(value: unknown): string {
-  if (Array.isArray(value)) return value.join(", ");
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (value === null || value === undefined || value === "") return "Not set";
-  return String(value);
-}
-
-function formatInputListData(data: unknown): string {
-  if (!Array.isArray(data)) return "";
-  return data
-    .map((v) => {
-      if (v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean")
-        return String(v);
-      try {
-        return JSON.stringify(v);
-      } catch {
-        return String(v);
-      }
-    })
-    .join("\n");
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (value && typeof value === "object" && !Array.isArray(value))
-    return value as Record<string, unknown>;
-  return {};
-}
-
-function getSelectedModule(modules: ModuleCatalog[], slug: string): ModuleCatalog | null {
-  return modules.find((m) => m.slug === slug) ?? null;
-}
-
-function getSelectedEndpoint(
-  mod: ModuleCatalog | null,
-  slug: string
-): ModuleEndpointCatalog | null {
-  if (!mod) return null;
-  return mod.endpoints.find((e) => e.slug === slug) ?? mod.endpoints[0] ?? null;
-}
-
-interface NavFolderNode {
-  name: string;
-  key: string;
-  children: NavFolderNode[];
-  endpoints: ModuleEndpointCatalog[];
-}
-
-function getEndpointPathGroup(pathTemplate: string): string {
-  const normalized = pathTemplate.trim().startsWith("/")
-    ? pathTemplate.trim()
-    : `/${pathTemplate.trim()}`;
-  const [first] = normalized.split("/").filter(Boolean);
-  return first ? first : "misc";
-}
-
-function buildFolderTree(moduleKey: string, endpoints: ModuleEndpointCatalog[]): NavFolderNode {
-  const root: NavFolderNode = { name: "", key: moduleKey, children: [], endpoints: [] };
-
-  function getOrCreateChild(parent: NavFolderNode, name: string): NavFolderNode {
-    let child = parent.children.find((c) => c.name === name);
-    if (!child) {
-      child = { name, key: `${parent.key}/${name}`, children: [], endpoints: [] };
-      parent.children.push(child);
-    }
-    return child;
-  }
-
-  for (const ep of endpoints) {
-    const folderPath =
-      ep.folder && ep.folder.length > 0
-        ? ep.folder
-        : [getEndpointPathGroup(ep.pathTemplate)];
-
-    let node = root;
-    for (const part of folderPath) {
-      node = getOrCreateChild(node, part);
-    }
-    node.endpoints.push(ep);
-  }
-
-  function sortNode(n: NavFolderNode) {
-    n.children.sort((a, b) => a.name.localeCompare(b.name));
-    n.endpoints.sort((a, b) =>
-      `${a.method} ${a.label}`.localeCompare(`${b.method} ${b.label}`)
-    );
-    for (const c of n.children) sortNode(c);
-  }
-  sortNode(root);
-
-  return root;
-}
-
-function applyCatalogDefaults(input: {
-  current: CreateRunFormState;
-  moduleDefinition: ModuleCatalog;
-  endpointDefinition?: ModuleEndpointCatalog | null;
-}): CreateRunFormState {
-  const ep = input.endpointDefinition ?? input.moduleDefinition.endpoints[0] ?? null;
-  const cfg = asRecord(ep?.defaultRunConfig);
-  const stopHttp = Array.isArray(cfg.stopOnHttpStatuses)
-    ? cfg.stopOnHttpStatuses.join(",")
-    : input.current.stopOnHttpStatuses;
-  const env =
-    (cfg.targetEnvironment as TargetEnvironment | undefined) ??
-    input.moduleDefinition.defaultTargetEnvironment;
-
-  const cfgQueryParams =
-    cfg.queryParams && typeof cfg.queryParams === "object" && !Array.isArray(cfg.queryParams)
-      ? (cfg.queryParams as Record<string, string>)
-      : null;
-  const queryParamRows: QueryParamRow[] = cfgQueryParams
-    ? [...Object.entries(cfgQueryParams).map(([key, value]) => ({ key, value })), { key: "", value: "" }]
-    : [{ key: "", value: "" }];
-
-  const cfgHeaders =
-    cfg.headers && typeof cfg.headers === "object" && !Array.isArray(cfg.headers)
-      ? (cfg.headers as Record<string, string>)
-      : null;
-  const headerRows: QueryParamRow[] = cfgHeaders
-    ? [...Object.entries(cfgHeaders).map(([key, value]) => ({ key, value })), { key: "", value: "" }]
-    : [{ key: "", value: "" }];
-
-  const cfgFormBody =
-    cfg.formBody && typeof cfg.formBody === "object" && !Array.isArray(cfg.formBody)
-      ? (cfg.formBody as Record<string, string>)
-      : null;
-  const formBodyRows: QueryParamRow[] = cfgFormBody
-    ? [...Object.entries(cfgFormBody).map(([key, value]) => ({ key, value })), { key: "", value: "" }]
-    : [{ key: "", value: "" }];
-
-  const bodyType =
-    typeof cfg.bodyType === "string" &&
-    ["none", "json", "form", "multipart", "text"].includes(cfg.bodyType)
-      ? (cfg.bodyType as "none" | "json" | "form" | "multipart" | "text")
-      : input.current.bodyType;
-
-  return {
-    ...input.current,
-    moduleSlug: input.moduleDefinition.slug,
-    endpointSlug: ep?.slug ?? "",
-    inputListId: "",
-    idsRaw: "",
-    tokenValues: {},
-    label: input.current.label || ep?.defaultRunLabel || "",
-    targetEnvironment: env,
-    method: typeof cfg.method === "string" ? cfg.method : (ep?.method ?? "POST"),
-    pathTemplate:
-      typeof cfg.pathTemplate === "string"
-        ? cfg.pathTemplate
-        : ep?.pathTemplate ?? "/:id",
-    queryParams: queryParamRows,
-    headers: headerRows,
-    bodyType,
-    formBodyRows,
-    requestBodyRaw:
-      cfg.requestBody && typeof cfg.requestBody === "object"
-        ? JSON.stringify(cfg.requestBody, null, 2)
-        : "",
-    dryRun: typeof cfg.dryRun === "boolean" ? cfg.dryRun : input.current.dryRun,
-    concurrency:
-      typeof cfg.concurrency === "number" ? cfg.concurrency : input.current.concurrency,
-    minDelayMs: typeof cfg.minDelayMs === "number" ? cfg.minDelayMs : input.current.minDelayMs,
-    maxRequestsPerMinute:
-      typeof cfg.maxRequestsPerMinute === "number" ? String(cfg.maxRequestsPerMinute) : "",
-    maxRetries: typeof cfg.maxRetries === "number" ? cfg.maxRetries : input.current.maxRetries,
-    retryDelayMs:
-      typeof cfg.retryDelayMs === "number" ? cfg.retryDelayMs : input.current.retryDelayMs,
-    stopAfterFailures:
-      typeof cfg.stopAfterFailures === "number" ? String(cfg.stopAfterFailures) : "",
-    stopAfterConsecutiveFailures:
-      typeof cfg.stopAfterConsecutiveFailures === "number"
-        ? String(cfg.stopAfterConsecutiveFailures)
-        : "",
-    stopOnHttpStatuses: stopHttp,
-    skipAuth: false,
-    disabledDefaultHeaders: [],
-  };
-}
-
-async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    headers: { "content-type": "application/json" },
-    ...init,
-  });
-  if (!response.ok) {
-    const body = (await response.json().catch(() => ({ error: "Request failed" }))) as {
-      error?: string;
-    };
-    throw new Error(body.error ?? "Request failed");
-  }
-  return response.json() as Promise<T>;
-}
-
-function usePolling(callback: () => void, enabled: boolean, delayMs: number): void {
-  const onTick = useEffectEvent(callback);
-  useEffect(() => {
-    if (!enabled) return;
-    onTick();
-    const id = window.setInterval(() => onTick(), delayMs);
-    return () => window.clearInterval(id);
-  }, [delayMs, enabled, onTick]);
-}
-
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+  CreateRunFormState, ModuleCatalog, ModuleEndpointCatalog, NavFolderNode,
+  QueryParamRow, RunDetail, RunEvent, RunItem, RunItemStatus,
+  RunSummary, RuntimeConfig, SavedInputList, Tab, TargetEnvironment,
+} from "./types";
+import { defaultFormState } from "./types";
+import {
+  applyEnvVars, applyCatalogDefaults, buildFolderTree, buildPreviewUrl,
+  countTreeEndpoints, extractAllPathTokens, formatBytes,
+  formatConfigValue, formatDate, formatInputListData, formatRuntime,
+  formatStructuredValue, getSelectedEndpoint, getSelectedModule,
+  highlightSearch, parseIdList, parseItemResponse, requestJson,
+  syntaxHighlightJson, usePolling,
+} from "./helpers";
+import { KeyValueTable } from "./components/KeyValueTable";
+import { Modal } from "./components/Modal";
+import { RunHistoryItem } from "./components/RunHistoryItem";
+import { VarInput, VarTextarea } from "./components/VarHighlight";
 /* ── App ──────────────────────────────────────────────────────────── */
 
 export function App() {
@@ -557,6 +29,7 @@ export function App() {
   const [inputLists, setInputLists] = useState<SavedInputList[]>([]);
   const [itemFilter, setItemFilter] = useState<RunItemStatus | "ALL">("ALL");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [inspectorSearch, setInspectorSearch] = useState("");
   const [formState, setFormState] = useState<CreateRunFormState>(defaultFormState);
   const [newInputListLabel, setNewInputListLabel] = useState("");
   const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig | null>(null);
@@ -575,6 +48,26 @@ export function App() {
   const [sidebarView, setSidebarView] = useState<"collections" | "history" | "input-lists" | "env" | "settings">("collections");
   const [sendMenuOpen, setSendMenuOpen] = useState(false);
   const [contextMenuEndpoint, setContextMenuEndpoint] = useState<{ slug: string; x: number; y: number } | null>(null);
+  const [moduleMenu, setModuleMenu] = useState<{ slug: string; x: number; y: number } | null>(null);
+  const [folderContextMenu, setFolderContextMenu] = useState<{ moduleSlug: string; folderPath: string[]; x: number; y: number } | null>(null);
+  const [selectedEndpoints, setSelectedEndpoints] = useState<Set<string>>(new Set());
+  const lastClickedEndpointRef = useRef<string | null>(null);
+  const [multiSelectMenu, setMultiSelectMenu] = useState<{ x: number; y: number } | null>(null);
+  const [addFolderDialog, setAddFolderDialog] = useState<{ moduleSlug: string; parentFolderPath: string[] } | null>(null);
+  const [addRequestDialog, setAddRequestDialog] = useState<{ moduleSlug: string; folderPath: string[] } | null>(null);
+  const [addFolderName, setAddFolderName] = useState("");
+  const [addRequestName, setAddRequestName] = useState("");
+  const [addRequestMethod, setAddRequestMethod] = useState("GET");
+  const [addRequestPath, setAddRequestPath] = useState("");
+  const [moduleConfigDrafts, setModuleConfigDrafts] = useState<Record<string, {
+    module: ModuleCatalog;
+    overrides: Record<string, unknown>;
+    draft: Record<string, unknown>;
+    activeSection: string;
+  }>>({});
+  const [moduleConfigSaving, setModuleConfigSaving] = useState(false);
+  const [bakeConfirmSlug, setBakeConfirmSlug] = useState<string | null>(null);
+  const [baking, setBaking] = useState(false);
   const [envVars, setEnvVars] = useState<QueryParamRow[]>(() => {
     try {
       const stored = localStorage.getItem("rav:env-vars");
@@ -705,16 +198,11 @@ export function App() {
           )
         : mod.endpoints;
       if (filtered.length > 0 || !q) {
-        result.set(mod.slug, buildFolderTree(mod.slug, filtered));
+        result.set(mod.slug, buildFolderTree(mod.slug, filtered, mod.customFolders));
       }
     }
     return result;
   }, [modules, navSearch]);
-
-  // Count visible endpoints in a tree node (for search compat)
-  function countTreeEndpoints(node: NavFolderNode): number {
-    return node.endpoints.length + node.children.reduce((s, c) => s + countTreeEndpoints(c), 0);
-  }
 
   const endpointRuns = useMemo(() => {
     if (!selectedEndpoint) return [];
@@ -749,13 +237,34 @@ export function App() {
   const selectedItem = items.find((i) => i.id === selectedItemId) ?? null;
   const pathTokens = extractAllPathTokens(formState.pathTemplate);
   const isMultiToken = pathTokens.length > 1;
+  const moduleVarsForPreview: QueryParamRow[] = useMemo(() =>
+    selectedModule?.variables
+      ? Object.entries(selectedModule.variables).map(([key, value]) => ({ key, value }))
+      : [],
+    [selectedModule],
+  );
+
+  /** Set of all variable names that will resolve at runtime — drives VarInput/VarTextarea highlighting */
+  const availableVarNames = useMemo(() => {
+    const names = new Set<string>();
+    if (selectedModule?.variables) {
+      for (const key of Object.keys(selectedModule.variables)) names.add(key);
+    }
+    for (const v of envVars) {
+      if (v.key.trim()) names.add(v.key.trim());
+    }
+    names.add("itemValue");
+    for (const token of pathTokens) names.add(token);
+    return names;
+  }, [selectedModule, envVars, pathTokens]);
+
   const previewUrl = buildPreviewUrl({
     baseUrl: selectedModule?.environments[formState.targetEnvironment]?.baseUrl,
     pathTemplate: formState.pathTemplate,
     idsRaw: formState.idsRaw,
     tokenValues: formState.tokenValues,
     queryParams: formState.queryParams,
-    envVars,
+    envVars: [...moduleVarsForPreview, ...envVars],
   });
   const idCount = isMultiToken
     ? Math.min(...pathTokens.map((t) => parseIdList(formState.tokenValues[t] ?? "").length))
@@ -777,16 +286,7 @@ export function App() {
     });
   }
 
-  // Auto-open all top-level folders on first load
-  useEffect(() => {
-    if (modules.length > 0 && openFolders.size === 0) {
-      const keys = new Set<string>();
-      for (const tree of navTreeByModule.values()) {
-        for (const child of tree.children) keys.add(child.key);
-      }
-      if (keys.size > 0) setOpenFolders(keys);
-    }
-  }, [modules.length]);
+  // (Folders start collapsed — user expands them manually)
 
   function clearRunState() {
     setSelectedRunId(null);
@@ -829,6 +329,7 @@ export function App() {
     const tabId = `${targetModule.slug}:${endpoint.slug}`;
     const newTab: Tab = {
       id: tabId,
+      type: "endpoint",
       endpointSlug: endpoint.slug,
       moduleSlug: targetModule.slug,
       method: endpoint.method,
@@ -849,25 +350,34 @@ export function App() {
   }
 
   function handleCloseTab(tabId: string) {
+    // If closing a module-config tab, clean up its draft state
+    const closingTab = tabs.find((t) => t.id === tabId);
+    if (closingTab?.type === "module-config") {
+      setModuleConfigDrafts((prev) => {
+        const next = { ...prev };
+        delete next[closingTab.moduleSlug];
+        return next;
+      });
+    }
     setTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
       if (activeTabId === tabId) {
         // Activate the nearest remaining tab, or clear
         const closedIndex = prev.findIndex((t) => t.id === tabId);
         const fallback = next[Math.min(closedIndex, next.length - 1)] ?? null;
-        if (fallback && selectedModule) {
-          const ep = selectedModule.endpoints.find((e) => e.slug === fallback.endpointSlug);
-          if (ep) {
-            // Defer to avoid state conflicts within this setter
-            setTimeout(() => {
-              setActiveTabId(fallback.id);
-              activateEndpoint(ep);
-            }, 0);
-          }
+        if (fallback) {
+          setTimeout(() => {
+            setActiveTabId(fallback.id);
+            if (fallback.type === "endpoint" && selectedModule) {
+              const ep = selectedModule.endpoints.find((e) => e.slug === fallback.endpointSlug);
+              if (ep) activateEndpoint(ep);
+            }
+          }, 0);
         } else {
           setTimeout(() => {
             setActiveTabId(null);
             clearRunState();
+            setFormState((cur) => ({ ...cur, endpointSlug: "", moduleSlug: "" }));
           }, 0);
         }
       }
@@ -878,6 +388,7 @@ export function App() {
   function handleClickTab(tab: Tab) {
     if (activeTabId === tab.id) return;
     setActiveTabId(tab.id);
+    if (tab.type === "module-config") return;
     if (!selectedModule) return;
     const ep = selectedModule.endpoints.find((e) => e.slug === tab.endpointSlug);
     if (ep) activateEndpoint(ep);
@@ -890,7 +401,11 @@ export function App() {
     setError(null);
     try {
       // Apply env var substitution helpers
-      const ev = envVars.filter((v) => v.key.trim());
+      // Module-level variables are lower priority; sidebar env vars override them
+      const moduleVars: QueryParamRow[] = selectedModule?.variables
+        ? Object.entries(selectedModule.variables).map(([key, value]) => ({ key, value }))
+        : [];
+      const ev = [...moduleVars, ...envVars.filter((v) => v.key.trim())];
       const sub = (s: string) => applyEnvVars(s, ev);
 
       // Build body fields based on bodyType
@@ -980,6 +495,10 @@ export function App() {
         disabledDefaultHeaders: formState.disabledDefaultHeaders.length > 0
           ? formState.disabledDefaultHeaders
           : undefined,
+        timeoutMs: formState.timeoutMs
+          ? Number.parseInt(formState.timeoutMs, 10)
+          : undefined,
+        followRedirects: formState.followRedirects,
       };
       const res = await requestJson<{ runId: string }>("/api/runs/http-request", {
         method: "POST",
@@ -1158,6 +677,93 @@ export function App() {
     setSidebarView("collections");
   }
 
+  function handleReplayRun() {
+    if (!runDetail) return;
+    const cfg = runDetail.config;
+    const safeStr = (v: unknown) => typeof v === "string" ? v : "";
+    const safeNum = (v: unknown, fallback: number) => typeof v === "number" ? v : fallback;
+
+    const cfgHeaders = cfg.headers && typeof cfg.headers === "object" && !Array.isArray(cfg.headers)
+      ? cfg.headers as Record<string, string> : {};
+    const headerRows: QueryParamRow[] = Object.entries(cfgHeaders).length > 0
+      ? [...Object.entries(cfgHeaders).map(([key, value]) => ({ key, value })), { key: "", value: "" }]
+      : [{ key: "", value: "" }];
+
+    const cfgQp = cfg.queryParams && typeof cfg.queryParams === "object" && !Array.isArray(cfg.queryParams)
+      ? cfg.queryParams as Record<string, string> : {};
+    const qpRows: QueryParamRow[] = Object.entries(cfgQp).length > 0
+      ? [...Object.entries(cfgQp).map(([key, value]) => ({ key, value })), { key: "", value: "" }]
+      : [{ key: "", value: "" }];
+
+    const cfgFormBody = cfg.formBody && typeof cfg.formBody === "object" && !Array.isArray(cfg.formBody)
+      ? cfg.formBody as Record<string, string> : {};
+    const formRows: QueryParamRow[] = Object.entries(cfgFormBody).length > 0
+      ? [...Object.entries(cfgFormBody).map(([key, value]) => ({ key, value })), { key: "", value: "" }]
+      : [{ key: "", value: "" }];
+
+    const ids = Array.isArray(cfg.itemValues) ? (cfg.itemValues as string[]).filter((v) => v !== "0") : [];
+    const stopCodes = Array.isArray(cfg.stopOnHttpStatuses) ? (cfg.stopOnHttpStatuses as number[]).join(",") : "";
+
+    const replayModuleSlug = safeStr(runDetail.moduleSlug);
+    const replayEndpointSlug = safeStr(cfg.endpointSlug);
+
+    setFormState((cur) => ({
+      ...cur,
+      moduleSlug: replayModuleSlug,
+      endpointSlug: replayEndpointSlug,
+      targetEnvironment: (safeStr(cfg.targetEnvironment) || cur.targetEnvironment) as TargetEnvironment,
+      method: safeStr(cfg.method) || cur.method,
+      pathTemplate: safeStr(cfg.pathTemplate) || cur.pathTemplate,
+      bodyType: (["none","json","form","multipart","text"].includes(safeStr(cfg.bodyType)) ? safeStr(cfg.bodyType) : cur.bodyType) as "none" | "json" | "form" | "multipart" | "text",
+      requestBodyRaw: cfg.requestBody && typeof cfg.requestBody === "object" ? JSON.stringify(cfg.requestBody, null, 2) : safeStr(cfg.requestBodyText),
+      idsRaw: ids.join("\n"),
+      label: "",
+      queryParams: qpRows,
+      headers: headerRows,
+      formBodyRows: formRows,
+      dryRun: typeof cfg.dryRun === "boolean" ? cfg.dryRun : cur.dryRun,
+      concurrency: safeNum(cfg.concurrency, cur.concurrency),
+      minDelayMs: safeNum(cfg.minDelayMs, cur.minDelayMs),
+      maxRequestsPerMinute: typeof cfg.maxRequestsPerMinute === "number" ? String(cfg.maxRequestsPerMinute) : "",
+      maxRetries: safeNum(cfg.maxRetries, cur.maxRetries),
+      retryDelayMs: safeNum(cfg.retryDelayMs, cur.retryDelayMs),
+      stopAfterFailures: typeof cfg.stopAfterFailures === "number" ? String(cfg.stopAfterFailures) : "",
+      stopAfterConsecutiveFailures: typeof cfg.stopAfterConsecutiveFailures === "number" ? String(cfg.stopAfterConsecutiveFailures) : "",
+      stopOnHttpStatuses: stopCodes,
+      skipAuth: typeof cfg.skipAuth === "boolean" ? cfg.skipAuth : false,
+      disabledDefaultHeaders: [],
+      timeoutMs: typeof cfg.timeoutMs === "number" ? String(cfg.timeoutMs) : "",
+      followRedirects: typeof cfg.followRedirects === "boolean" ? cfg.followRedirects : true,
+    }));
+
+    // Sync tab bar so the replayed endpoint is visible & active
+    if (replayModuleSlug && replayEndpointSlug) {
+      const tabId = `${replayModuleSlug}:${replayEndpointSlug}`;
+      const replayMod = modules.find((m) => m.slug === replayModuleSlug);
+      const replayEp = replayMod?.endpoints.find((e) => e.slug === replayEndpointSlug);
+      if (replayEp) {
+        const existing = tabs.find((t) => t.id === tabId);
+        if (!existing) {
+          setTabs((prev) => {
+            const pinned = prev.filter((t) => t.pinned);
+            return [...pinned, {
+              id: tabId,
+              endpointSlug: replayEndpointSlug,
+              moduleSlug: replayModuleSlug,
+              method: replayEp.method,
+              label: replayEp.label,
+              pinned: false,
+            }];
+          });
+        }
+        setActiveTabId(tabId);
+      }
+    }
+
+    setSuccessMessage("Restored form from previous run config.");
+    setTimeout(() => setSuccessMessage(null), 3000);
+  }
+
   function handleCopyAsCliCommand() {
     if (!selectedEndpoint) return;
     const ids = parseIdList(formState.idsRaw);
@@ -1232,6 +838,97 @@ export function App() {
     setContextMenuEndpoint(null);
   }
 
+  /** Flatten tree into an ordered list of endpoint slugs for shift-click range selection. */
+  function flattenTree(node: NavFolderNode): string[] {
+    const result: string[] = [];
+    for (const child of node.children) result.push(...flattenTree(child));
+    for (const ep of node.endpoints) result.push(ep.slug);
+    return result;
+  }
+
+  function handleEndpointClick(ep: ModuleEndpointCatalog, mod: ModuleCatalog, e: React.MouseEvent) {
+    if (e.shiftKey && lastClickedEndpointRef.current && mod.slug === formState.moduleSlug) {
+      // Shift-click: range select
+      const tree = navTreeByModule.get(mod.slug);
+      if (tree) {
+        const flat = flattenTree(tree);
+        const anchorIdx = flat.indexOf(lastClickedEndpointRef.current);
+        const targetIdx = flat.indexOf(ep.slug);
+        if (anchorIdx !== -1 && targetIdx !== -1) {
+          const start = Math.min(anchorIdx, targetIdx);
+          const end = Math.max(anchorIdx, targetIdx);
+          const range = new Set(flat.slice(start, end + 1));
+          setSelectedEndpoints(range);
+          return;
+        }
+      }
+    }
+    // Normal click: clear multi-select, select endpoint
+    setSelectedEndpoints(new Set());
+    lastClickedEndpointRef.current = ep.slug;
+    handleSelectEndpoint(ep, mod);
+  }
+
+  function handleEndpointContextMenu(ep: ModuleEndpointCatalog, mod: ModuleCatalog, e: React.MouseEvent) {
+    e.preventDefault();
+    if (selectedEndpoints.size > 1 && selectedEndpoints.has(ep.slug)) {
+      // Right-click on multi-selection: show multi-select menu
+      setMultiSelectMenu({ x: e.clientX, y: e.clientY });
+    } else {
+      setSelectedEndpoints(new Set());
+      setContextMenuEndpoint({ slug: ep.slug, x: e.clientX, y: e.clientY });
+    }
+  }
+
+  async function handleAddFolder() {
+    if (!addFolderDialog || !addFolderName.trim()) return;
+    try {
+      const folderPath = [...addFolderDialog.parentFolderPath, addFolderName.trim()];
+      await requestJson(`/api/modules/${addFolderDialog.moduleSlug}/folders`, {
+        method: "POST",
+        body: JSON.stringify({ folderPath }),
+      });
+      const cfg = await requestJson<RuntimeConfig>("/api/config");
+      setRuntimeConfig(cfg);
+      // Auto-open the new folder
+      setOpenFolders((prev) => {
+        const next = new Set(prev);
+        next.add(`${addFolderDialog.moduleSlug}/${folderPath.join("/")}`);
+        return next;
+      });
+      setAddFolderDialog(null);
+      setAddFolderName("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create folder");
+    }
+  }
+
+  async function handleAddRequest() {
+    if (!addRequestDialog || !addRequestName.trim() || !addRequestPath.trim()) return;
+    try {
+      const folder = addRequestDialog.folderPath.length > 0 ? addRequestDialog.folderPath : undefined;
+      await requestJson(`/api/modules/${addRequestDialog.moduleSlug}/endpoints`, {
+        method: "POST",
+        body: JSON.stringify({
+          label: addRequestName.trim(),
+          method: addRequestMethod,
+          pathTemplate: addRequestPath.trim(),
+          folder,
+        }),
+      });
+      const cfg = await requestJson<RuntimeConfig>("/api/config");
+      setRuntimeConfig(cfg);
+      setAddRequestDialog(null);
+      setAddRequestName("");
+      setAddRequestMethod("GET");
+      setAddRequestPath("");
+      setSuccessMessage("Request added.");
+      setTimeout(() => setSuccessMessage(null), 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create request");
+    }
+  }
+
   // Close context menu on outside click
   useEffect(() => {
     if (!contextMenuEndpoint) return;
@@ -1239,6 +936,133 @@ export function App() {
     window.addEventListener("click", handler);
     return () => window.removeEventListener("click", handler);
   }, [contextMenuEndpoint]);
+
+  // Close module menu on outside click (deferred so the opening click doesn't race)
+  useEffect(() => {
+    if (!moduleMenu) return;
+    let cleanup = () => { /* noop */ };
+    const raf = requestAnimationFrame(() => {
+      const handler = (e: MouseEvent) => {
+        const target = e.target as HTMLElement | null;
+        if (target?.closest?.(".module-context-menu")) return;
+        setModuleMenu(null);
+      };
+      window.addEventListener("click", handler);
+      cleanup = () => window.removeEventListener("click", handler);
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      cleanup();
+    };
+  }, [moduleMenu]);
+
+  // Close folder context menu on outside click
+  useEffect(() => {
+    if (!folderContextMenu) return;
+    const handler = () => setFolderContextMenu(null);
+    requestAnimationFrame(() => {
+      window.addEventListener("click", handler);
+    });
+    return () => window.removeEventListener("click", handler);
+  }, [folderContextMenu]);
+
+  // Close multi-select menu on outside click
+  useEffect(() => {
+    if (!multiSelectMenu) return;
+    const handler = () => setMultiSelectMenu(null);
+    window.addEventListener("click", handler);
+    return () => window.removeEventListener("click", handler);
+  }, [multiSelectMenu]);
+
+  async function openModuleConfigEditor(slug: string) {
+    setModuleMenu(null);
+
+    // If a config tab for this module is already open, just activate it
+    const existing = tabs.find((t) => t.type === "module-config" && t.moduleSlug === slug);
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+
+    try {
+      const data = await requestJson<{
+        module: ModuleCatalog;
+        overrides: Record<string, unknown>;
+        hasOverrides: boolean;
+      }>(`/api/modules/${slug}/config`);
+
+      setModuleConfigDrafts((prev) => ({
+        ...prev,
+        [slug]: {
+          module: data.module,
+          overrides: data.overrides,
+          draft: { ...data.overrides },
+          activeSection: "general",
+        },
+      }));
+
+      const tabId = `config:${slug}`;
+      const mod = modules.find((m) => m.slug === slug);
+      const newTab: Tab = {
+        id: tabId,
+        type: "module-config",
+        moduleSlug: slug,
+        label: mod?.label ?? slug,
+        pinned: true,
+      };
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(tabId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load module config");
+    }
+  }
+
+  async function saveModuleConfig(slug: string) {
+    const configDraft = moduleConfigDrafts[slug];
+    if (!configDraft) return;
+    setModuleConfigSaving(true);
+    try {
+      await requestJson(`/api/modules/${slug}/config`, {
+        method: "PATCH",
+        body: JSON.stringify(configDraft.draft),
+      });
+      // reload runtime config to refresh sidebar
+      const cfg = await requestJson<RuntimeConfig>("/api/config");
+      setRuntimeConfig(cfg);
+      setSuccessMessage("Module config saved.");
+      setTimeout(() => setSuccessMessage(null), 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save module config");
+    } finally {
+      setModuleConfigSaving(false);
+    }
+  }
+
+  async function handleBakeModule(slug: string) {
+    setBaking(true);
+    try {
+      await requestJson(`/api/modules/${slug}/bake`, { method: "POST", body: "{}" });
+      const cfg = await requestJson<RuntimeConfig>("/api/config");
+      setRuntimeConfig(cfg);
+      setBakeConfirmSlug(null);
+      // Refresh the config tab draft if open (overrides are now empty)
+      if (moduleConfigDrafts[slug]) {
+        try {
+          const data = await requestJson<{ module: ModuleCatalog; overrides: Record<string, unknown>; hasOverrides: boolean }>(`/api/modules/${slug}/config`);
+          setModuleConfigDrafts((prev) => ({
+            ...prev,
+            [slug]: { ...prev[slug], module: data.module, overrides: data.overrides, draft: { ...data.overrides } },
+          }));
+        } catch { /* ignore refresh failure */ }
+      }
+      setSuccessMessage("Overrides baked into .ts file. Backup created.");
+      setTimeout(() => setSuccessMessage(null), 5000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to rewrite module file");
+    } finally {
+      setBaking(false);
+    }
+  }
 
   // Close send menu on outside click
   useEffect(() => {
@@ -1396,16 +1220,23 @@ export function App() {
                 const modOpen = openModules.has(mod.slug);
                 const modTree = navTreeByModule.get(mod.slug);
                 if (navSearch && (!modTree || countTreeEndpoints(modTree) === 0)) return null;
-                const isSelected = formState.moduleSlug === mod.slug;
+                const activeTab = tabs.find((t) => t.id === activeTabId);
+                const isSelected = formState.moduleSlug === mod.slug || (activeTab?.type === "module-config" && activeTab.moduleSlug === mod.slug);
 
                 function renderFolderNode(node: NavFolderNode, depth: number): React.ReactNode {
                   const isOpen = openFolders.has(node.key);
                   const totalCount = countTreeEndpoints(node);
+                  // Derive folder path from node.key: "modSlug/a/b" → ["a","b"]
+                  const folderPath = node.key.split("/").slice(1);
                   return (
                     <div className="tree-folder" key={node.key} style={{ "--folder-depth": depth } as React.CSSProperties}>
                       <button
                         className="tree-folder-header"
                         onClick={() => toggleFolder(node.key)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setFolderContextMenu({ moduleSlug: mod.slug, folderPath, x: e.clientX, y: e.clientY });
+                        }}
                         type="button"
                       >
                         <span className={`tree-chevron ${isOpen ? "open" : ""}`}>&#9654;</span>
@@ -1418,13 +1249,10 @@ export function App() {
                           {node.children.map((child) => renderFolderNode(child, depth + 1))}
                           {node.endpoints.map((ep) => (
                             <button
-                              className={`tree-item ${formState.moduleSlug === mod.slug && formState.endpointSlug === ep.slug ? "active" : ""}`}
+                              className={`tree-item ${selectedEndpoints.has(ep.slug) ? "multi-selected" : ""} ${activeTab?.type !== "module-config" && formState.moduleSlug === mod.slug && formState.endpointSlug === ep.slug ? "active" : ""}`}
                               key={ep.slug}
-                              onClick={() => handleSelectEndpoint(ep, mod)}
-                              onContextMenu={(e) => {
-                                e.preventDefault();
-                                setContextMenuEndpoint({ slug: ep.slug, x: e.clientX, y: e.clientY });
-                              }}
+                              onClick={(e) => handleEndpointClick(ep, mod, e)}
+                              onContextMenu={(e) => handleEndpointContextMenu(ep, mod, e)}
                               style={{ "--folder-depth": depth + 1 } as React.CSSProperties}
                               type="button"
                             >
@@ -1452,23 +1280,44 @@ export function App() {
 
                 return (
                   <div className="tree-collection" key={mod.slug}>
-                    <button
-                      className={`tree-collection-header ${isSelected ? "active" : ""}`}
-                      onClick={() =>
-                        setOpenModules((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(mod.slug)) next.delete(mod.slug);
-                          else next.add(mod.slug);
-                          return next;
-                        })
-                      }
-                      type="button"
-                    >
-                      <span className={`tree-chevron ${modOpen ? "open" : ""}`}>&#9654;</span>
-                      <span className="tree-folder-icon">&#128193;</span>
-                      <span>{mod.label}</span>
-                      <span className="tree-folder-count">{mod.endpoints.length}</span>
-                    </button>
+                    <div className={`tree-collection-header ${isSelected ? "active" : ""}`}>
+                      <button
+                        className="tree-collection-toggle"
+                        onClick={() =>
+                          setOpenModules((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(mod.slug)) next.delete(mod.slug);
+                            else next.add(mod.slug);
+                            return next;
+                          })
+                        }
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setFolderContextMenu({ moduleSlug: mod.slug, folderPath: [], x: e.clientX, y: e.clientY });
+                        }}
+                        type="button"
+                      >
+                        <span className={`tree-chevron ${modOpen ? "open" : ""}`}>&#9654;</span>
+                        <span className="tree-folder-icon">&#128193;</span>
+                        <span>{mod.label}</span>
+                        <span className="tree-folder-count">{mod.endpoints.length}</span>
+                      </button>
+                      <span className={`tree-collection-actions${moduleMenu?.slug === mod.slug ? " menu-open" : ""}`}>
+                        <span
+                          className="tree-item-action module-menu-trigger"
+                          title="Module actions"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (moduleMenu?.slug === mod.slug) {
+                              setModuleMenu(null);
+                            } else {
+                              const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                              setModuleMenu({ slug: mod.slug, x: rect.right, y: rect.bottom + 2 });
+                            }
+                          }}
+                        >&hellip;</span>
+                      </span>
+                    </div>
 
                     {modOpen && modTree
                       ? modTree.children.map((child) => renderFolderNode(child, 1))
@@ -1500,23 +1349,7 @@ export function App() {
               {runs.length > 0 ? (
                 <div className="history-list">
                   {runs.map((run) => (
-                    <button
-                      className={`run-history-item ${selectedRunId === run.id ? "active" : ""}`}
-                      key={run.id}
-                      onClick={() => handleSelectRunFromHistory(run)}
-                      type="button"
-                    >
-                      <div className="run-history-item-top">
-                        <strong>{run.label ?? run.action}</strong>
-                        <span className={`status-tag status-${run.status.toLowerCase()}`}>
-                          {run.status.toLowerCase()}
-                        </span>
-                      </div>
-                      <span className="run-history-item-meta">
-                        {run.completedItems}/{run.totalItems} done &middot;{" "}
-                        {run.failedItems} failed &middot; {formatDate(run.createdAt)}
-                      </span>
-                    </button>
+                    <RunHistoryItem key={run.id} run={run} isActive={selectedRunId === run.id} onClick={() => handleSelectRunFromHistory(run)} />
                   ))}
                 </div>
               ) : (
@@ -1598,45 +1431,7 @@ export function App() {
                 <p className="env-vars-hint">
                   Define variables to use as <code>{"{{varName}}"}</code> in URLs, headers, query params, and request bodies. Saved to browser storage.
                 </p>
-                <div className="query-params-table">
-                  {envVars.map((row, i) => (
-                    <div key={i} className="query-param-row">
-                      <input
-                        className="query-param-key"
-                        placeholder="Variable name"
-                        value={row.key}
-                        onChange={(e) => {
-                          const next = envVars.map((r, j) =>
-                            j === i ? { ...r, key: e.target.value } : r
-                          );
-                          const last = next[next.length - 1];
-                          if (last.key || last.value) next.push({ key: "", value: "" });
-                          setEnvVars(next);
-                        }}
-                      />
-                      <input
-                        className="query-param-value"
-                        placeholder="Value"
-                        value={row.value}
-                        onChange={(e) => {
-                          const next = envVars.map((r, j) =>
-                            j === i ? { ...r, value: e.target.value } : r
-                          );
-                          const last = next[next.length - 1];
-                          if (last.key || last.value) next.push({ key: "", value: "" });
-                          setEnvVars(next);
-                        }}
-                      />
-                      {(row.key || row.value) ? (
-                        <button
-                          type="button"
-                          className="remove-param-btn"
-                          onClick={() => setEnvVars((cur) => cur.filter((_, j) => j !== i))}
-                        >×</button>
-                      ) : <span className="remove-param-btn" />}
-                    </div>
-                  ))}
-                </div>
+                <KeyValueTable rows={envVars} onChange={setEnvVars} keyPlaceholder="Variable name" />
               </div>
             </div>
             <div className="sidebar-footer">
@@ -1710,6 +1505,135 @@ export function App() {
         );
       })() : null}
 
+      {/* ── Module context menu (fixed, rendered outside tree) ───── */}
+      {moduleMenu ? (() => {
+        const mod = modules.find((m) => m.slug === moduleMenu.slug);
+        if (!mod) return null;
+        return (
+          <div className="context-menu module-context-menu" style={{ top: moduleMenu.y, left: moduleMenu.x }}>
+            <button type="button" onClick={() => { setAddRequestDialog({ moduleSlug: mod.slug, folderPath: [] }); setModuleMenu(null); }}>Add request</button>
+            <button type="button" onClick={() => { setAddFolderDialog({ moduleSlug: mod.slug, parentFolderPath: [] }); setModuleMenu(null); }}>Add folder</button>
+            <div className="context-menu-divider" />
+            <button type="button" onClick={() => void openModuleConfigEditor(mod.slug)}>Edit Config</button>
+            <button type="button" onClick={() => { exportAsPostman(mod); setModuleMenu(null); }}>Export as Postman</button>
+            <button type="button" onClick={() => { setBakeConfirmSlug(mod.slug); setModuleMenu(null); }}>Rewrite Module File</button>
+          </div>
+        );
+      })() : null}
+
+      {/* ── Folder context menu ───────────────────────────────────── */}
+      {folderContextMenu ? (
+        <div className="context-menu" style={{ top: folderContextMenu.y, left: folderContextMenu.x }}>
+          <button type="button" onClick={() => {
+            setAddRequestDialog({ moduleSlug: folderContextMenu.moduleSlug, folderPath: folderContextMenu.folderPath });
+            setFolderContextMenu(null);
+          }}>Add request</button>
+          <button type="button" onClick={() => {
+            setAddFolderDialog({ moduleSlug: folderContextMenu.moduleSlug, parentFolderPath: folderContextMenu.folderPath });
+            setFolderContextMenu(null);
+          }}>Add folder</button>
+        </div>
+      ) : null}
+
+      {/* ── Multi-select context menu ─────────────────────────────── */}
+      {multiSelectMenu && selectedEndpoints.size > 0 ? (
+        <div className="context-menu" style={{ top: multiSelectMenu.y, left: multiSelectMenu.x }}>
+          <button type="button" onClick={() => {
+            const eps = (selectedModule?.endpoints ?? []).filter((e) => selectedEndpoints.has(e.slug));
+            for (const ep of eps) handleOpenInNewTab(ep);
+            setMultiSelectMenu(null);
+            setSelectedEndpoints(new Set());
+          }}>Open {selectedEndpoints.size} in tabs</button>
+          <button type="button" onClick={() => {
+            const eps = (selectedModule?.endpoints ?? []).filter((e) => selectedEndpoints.has(e.slug));
+            const text = eps.map((e) => `${e.method} ${e.pathTemplate}`).join("\n");
+            void navigator.clipboard.writeText(text);
+            setSuccessMessage(`Copied ${eps.length} paths.`);
+            setTimeout(() => setSuccessMessage(null), 3000);
+            setMultiSelectMenu(null);
+            setSelectedEndpoints(new Set());
+          }}>Copy {selectedEndpoints.size} paths</button>
+        </div>
+      ) : null}
+
+      {/* ── Add Folder Dialog ─────────────────────────────────────── */}
+      {addFolderDialog ? (
+        <Modal title="Add Folder" onClose={() => { setAddFolderDialog(null); setAddFolderName(""); }} footer={<>
+          <button type="button" className="ghost-button" onClick={() => { setAddFolderDialog(null); setAddFolderName(""); }}>Cancel</button>
+          <button type="button" className="primary-button" disabled={!addFolderName.trim()} onClick={() => void handleAddFolder()}>Create</button>
+        </>}>
+          {addFolderDialog.parentFolderPath.length > 0 ? (
+            <p className="config-hint">Inside: {addFolderDialog.parentFolderPath.join(" / ")}</p>
+          ) : null}
+          <label className="entity-field">
+            <span className="entity-field-label">Folder name</span>
+            <input
+              value={addFolderName}
+              onChange={(e) => setAddFolderName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") void handleAddFolder(); }}
+              autoFocus
+              placeholder="e.g. Accounts"
+            />
+          </label>
+        </Modal>
+      ) : null}
+
+      {/* ── Add Request Dialog ────────────────────────────────────── */}
+      {addRequestDialog ? (
+        <Modal title="Add Request" onClose={() => { setAddRequestDialog(null); setAddRequestName(""); setAddRequestPath(""); }} footer={<>
+          <button type="button" className="ghost-button" onClick={() => { setAddRequestDialog(null); setAddRequestName(""); setAddRequestPath(""); }}>Cancel</button>
+          <button type="button" className="primary-button" disabled={!addRequestName.trim() || !addRequestPath.trim()} onClick={() => void handleAddRequest()}>Create</button>
+        </>}>
+          {addRequestDialog.folderPath.length > 0 ? (
+            <p className="config-hint">Inside: {addRequestDialog.folderPath.join(" / ")}</p>
+          ) : null}
+          <label className="entity-field" style={{ marginBottom: 12 }}>
+            <span className="entity-field-label">Name</span>
+            <input
+              value={addRequestName}
+              onChange={(e) => setAddRequestName(e.target.value)}
+              autoFocus
+              placeholder="e.g. Get User"
+            />
+          </label>
+          <div style={{ display: "flex", gap: 12 }}>
+            <label className="entity-field" style={{ flex: "0 0 100px" }}>
+              <span className="entity-field-label">Method</span>
+              <select value={addRequestMethod} onChange={(e) => setAddRequestMethod(e.target.value)}>
+                <option>GET</option>
+                <option>POST</option>
+                <option>PUT</option>
+                <option>PATCH</option>
+                <option>DELETE</option>
+              </select>
+            </label>
+            <label className="entity-field" style={{ flex: 1 }}>
+              <span className="entity-field-label">Path</span>
+              <input
+                value={addRequestPath}
+                onChange={(e) => setAddRequestPath(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") void handleAddRequest(); }}
+                placeholder="/example/:id"
+              />
+            </label>
+          </div>
+        </Modal>
+      ) : null}
+
+      {/* ── Bake Confirmation Dialog ──────────────────────────────── */}
+      {bakeConfirmSlug ? (
+        <Modal title="Rewrite Module File" onClose={() => setBakeConfirmSlug(null)} footer={<>
+          <button type="button" className="ghost-button" onClick={() => setBakeConfirmSlug(null)}>Cancel</button>
+          <button type="button" className="danger-button" disabled={baking} onClick={() => void handleBakeModule(bakeConfirmSlug)}>
+            {baking ? "Rewriting\u2026" : "Rewrite .ts File"}
+          </button>
+        </>}>
+          <p>This will regenerate the <code>.ts</code> module file for <strong>{bakeConfirmSlug}</strong> from the current merged config (base + overrides).</p>
+          <p className="config-hint">A <code>.bak</code> backup of the original file will be created first. The override file will be deleted after baking.</p>
+          <p className="config-hint" style={{ color: "var(--warning)" }}>This replaces comments and custom formatting in the .ts file. Only do this when you want to commit the overrides permanently.</p>
+        </Modal>
+      ) : null}
+
       {/* ── Workspace ─────────────────────────────────────────────── */}
       <main className="workspace">
         {/* Tab strip (open request tabs) */}
@@ -1722,9 +1646,13 @@ export function App() {
               onDoubleClick={() => handlePinTab(tab.id)}
               type="button"
             >
-              <span className={`tab-strip-method ${tab.method.toLowerCase()}`}>
-                {tab.method}
-              </span>
+              {tab.type === "module-config" ? (
+                <span className="tab-strip-icon">&#9881;</span>
+              ) : (
+                <span className={`tab-strip-method ${(tab.method ?? "GET").toLowerCase()}`}>
+                  {tab.method}
+                </span>
+              )}
               <span className="tab-label">{tab.label}</span>
               <span
                 className="tab-close"
@@ -1777,7 +1705,397 @@ export function App() {
           </div>
         ) : null}
 
-        {selectedEndpoint ? (
+        {/* ── Module Config Entity Editor (tab panel) ─────────────── */}
+        {(() => {
+          const aTab = tabs.find((t) => t.id === activeTabId);
+          if (!aTab || aTab.type !== "module-config") return null;
+          const cfgSlug = aTab.moduleSlug;
+          const cfgState = moduleConfigDrafts[cfgSlug];
+          if (!cfgState) return null;
+          const { module: mod, draft, activeSection } = cfgState;
+
+          const getField = <T,>(path: string, fallback: T): T => {
+            const parts = path.split(".");
+            let cursor: unknown = draft;
+            for (const p of parts) {
+              if (cursor && typeof cursor === "object" && p in (cursor as Record<string, unknown>)) {
+                cursor = (cursor as Record<string, unknown>)[p];
+              } else { cursor = undefined; break; }
+            }
+            if (cursor !== undefined) return cursor as T;
+            let baseCursor: unknown = mod;
+            for (const p of parts) {
+              if (baseCursor && typeof baseCursor === "object" && p in (baseCursor as Record<string, unknown>)) {
+                baseCursor = (baseCursor as Record<string, unknown>)[p];
+              } else return fallback;
+            }
+            return (baseCursor ?? fallback) as T;
+          };
+
+          const setField = (path: string, value: unknown) => {
+            const parts = path.split(".");
+            setModuleConfigDrafts((prev) => {
+              const entry = prev[cfgSlug];
+              if (!entry) return prev;
+              const newDraft = JSON.parse(JSON.stringify(entry.draft)) as Record<string, unknown>;
+              let cursor = newDraft;
+              for (let i = 0; i < parts.length - 1; i++) {
+                if (!(parts[i] in cursor) || typeof cursor[parts[i]] !== "object") cursor[parts[i]] = {};
+                cursor = cursor[parts[i]] as Record<string, unknown>;
+              }
+              cursor[parts[parts.length - 1]] = value;
+              return { ...prev, [cfgSlug]: { ...entry, draft: newDraft } };
+            });
+          };
+
+          const setSection = (s: string) => {
+            setModuleConfigDrafts((prev) => {
+              const entry = prev[cfgSlug];
+              if (!entry) return prev;
+              return { ...prev, [cfgSlug]: { ...entry, activeSection: s } };
+            });
+          };
+
+          const authMode = getField<string>("auth.mode", mod.auth?.mode ?? "jwt");
+
+          const sections = [
+            { key: "general", label: "General", icon: "\u2699" },
+            { key: "environments", label: "Environments", icon: "\uD83C\uDF10" },
+            { key: "auth", label: "Authorization", icon: "\uD83D\uDD12" },
+            { key: "headers", label: "Headers", icon: "\u2630" },
+            { key: "variables", label: "Variables", icon: "{ }" },
+          ];
+
+          return (
+            <div className="entity-editor">
+              {/* Entity header */}
+              <div className="entity-header">
+                <div className="entity-title-row">
+                  <span className="entity-icon">{"\uD83D\uDCC1"}</span>
+                  <div className="entity-title-group">
+                    <h2 className="entity-title">{getField("label", mod.label)}</h2>
+                    <span className="entity-subtitle">{getField("serviceName", mod.serviceName)} &middot; {mod.endpoints.length} endpoints</span>
+                  </div>
+                  <div className="entity-actions">
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={moduleConfigSaving}
+                      onClick={() => void saveModuleConfig(cfgSlug)}
+                    >{moduleConfigSaving ? "Saving\u2026" : "Save"}</button>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => { setBakeConfirmSlug(cfgSlug); }}
+                    >Bake to .ts</button>
+                  </div>
+                </div>
+                {/* Section tabs */}
+                <div className="entity-section-tabs">
+                  {sections.map((s) => (
+                    <button
+                      key={s.key}
+                      type="button"
+                      className={`entity-section-tab ${activeSection === s.key ? "active" : ""}`}
+                      onClick={() => setSection(s.key)}
+                    >{s.label}</button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Section content */}
+              <div className="entity-body">
+                {activeSection === "general" ? (
+                  <div className="entity-section">
+                    <div className="entity-card">
+                      <h3 className="entity-card-title">Identity</h3>
+                      <div className="entity-field-grid">
+                        <label className="entity-field">
+                          <span className="entity-field-label">Label</span>
+                          <input value={getField("label", mod.label)} onChange={(e) => setField("label", e.target.value)} />
+                        </label>
+                        <label className="entity-field">
+                          <span className="entity-field-label">Service Name</span>
+                          <input value={getField("serviceName", mod.serviceName)} onChange={(e) => setField("serviceName", e.target.value)} />
+                        </label>
+                      </div>
+                      <label className="entity-field">
+                        <span className="entity-field-label">Description</span>
+                        <textarea rows={3} value={getField("description", mod.description ?? "")} onChange={(e) => setField("description", e.target.value)} />
+                      </label>
+                    </div>
+                    <div className="entity-card">
+                      <h3 className="entity-card-title">Defaults</h3>
+                      <label className="entity-field" style={{ maxWidth: 260 }}>
+                        <span className="entity-field-label">Default Environment</span>
+                        <select value={getField("defaultTargetEnvironment", mod.defaultTargetEnvironment)} onChange={(e) => setField("defaultTargetEnvironment", e.target.value)}>
+                          {(() => {
+                            const envs = getField<Record<string, { baseUrl: string }>>("environments", mod.environments ?? {});
+                            const keys = Object.keys(envs);
+                            if (keys.length === 0) keys.push("staging", "prod");
+                            return keys.map((k) => <option key={k} value={k}>{k}</option>);
+                          })()}
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+                ) : activeSection === "environments" ? (
+                  <div className="entity-section">
+                    <div className="entity-card">
+                      <h3 className="entity-card-title">Environments</h3>
+                      <p className="entity-hint">Base URLs per target environment. These are used to resolve request paths.</p>
+                      <div className="entity-table">
+                        <div className="entity-table-header">
+                          <span className="entity-table-cell env-name-col">Name</span>
+                          <span className="entity-table-cell env-url-col">Base URL</span>
+                          <span className="entity-table-cell entity-table-action-col"></span>
+                        </div>
+                        {(() => {
+                          const envs = getField<Record<string, { baseUrl: string }>>("environments", mod.environments ?? {});
+                          return Object.entries(envs).map(([envKey, envVal]) => (
+                            <div key={envKey} className="entity-table-row">
+                              <span className="entity-table-cell env-name-col">
+                                <input
+                                  value={envKey}
+                                  onChange={(e) => {
+                                    const newEnvs = { ...envs };
+                                    delete newEnvs[envKey];
+                                    newEnvs[e.target.value] = envVal;
+                                    setField("environments", newEnvs);
+                                  }}
+                                  placeholder="environment"
+                                />
+                              </span>
+                              <span className="entity-table-cell env-url-col">
+                                <input
+                                  value={envVal?.baseUrl ?? ""}
+                                  onChange={(e) => setField(`environments.${envKey}.baseUrl`, e.target.value)}
+                                  placeholder="https://service.example.com"
+                                />
+                              </span>
+                              <span className="entity-table-cell entity-table-action-col">
+                                <button type="button" className="remove-row-btn" onClick={() => {
+                                  const newEnvs = { ...envs };
+                                  delete newEnvs[envKey];
+                                  setField("environments", newEnvs);
+                                }} title="Remove">&times;</button>
+                              </span>
+                            </div>
+                          ));
+                        })()}
+                      </div>
+                      <button type="button" className="ghost-button" style={{ marginTop: 8 }} onClick={() => {
+                        const envs = getField<Record<string, { baseUrl: string }>>("environments", mod.environments ?? {});
+                        setField("environments", { ...envs, "": { baseUrl: "" } });
+                      }}>+ Add environment</button>
+                    </div>
+                  </div>
+                ) : activeSection === "auth" ? (
+                  <div className="entity-section">
+                    <div className="entity-card">
+                      <h3 className="entity-card-title">Authorization</h3>
+                      <label className="entity-field" style={{ maxWidth: 260 }}>
+                        <span className="entity-field-label">Auth Mode</span>
+                        <select value={authMode} onChange={(e) => setField("auth.mode", e.target.value)}>
+                          <option value="jwt">JWT</option>
+                          <option value="apikey">API Key</option>
+                          <option value="bearer">Bearer Token</option>
+                          <option value="none">None</option>
+                        </select>
+                      </label>
+                    </div>
+                    {authMode === "jwt" ? (
+                      <div className="entity-card">
+                        <h3 className="entity-card-title">JWT Configuration</h3>
+                        <div className="entity-field-grid">
+                          <label className="entity-field">
+                            <span className="entity-field-label">Secret Env Var</span>
+                            <input value={getField("auth.secretEnvVar", mod.auth?.secretEnvVar ?? "")} onChange={(e) => setField("auth.secretEnvVar", e.target.value)} placeholder="MY_SERVICE_JWT_SECRET" />
+                          </label>
+                          <label className="entity-field">
+                            <span className="entity-field-label">Email</span>
+                            <input value={getField("auth.jwt.email", mod.auth?.jwt?.email ?? "")} onChange={(e) => setField("auth.jwt.email", e.target.value)} />
+                          </label>
+                          <label className="entity-field">
+                            <span className="entity-field-label">Subject</span>
+                            <input value={getField("auth.jwt.subject", "") as string} onChange={(e) => setField("auth.jwt.subject", e.target.value || undefined)} placeholder="(optional)" />
+                          </label>
+                          <label className="entity-field">
+                            <span className="entity-field-label">Issuer</span>
+                            <input value={getField("auth.jwt.issuer", "") as string} onChange={(e) => setField("auth.jwt.issuer", e.target.value || undefined)} placeholder="(optional)" />
+                          </label>
+                          <label className="entity-field">
+                            <span className="entity-field-label">Audience</span>
+                            <input value={getField("auth.jwt.audience", "") as string} onChange={(e) => setField("auth.jwt.audience", e.target.value || undefined)} placeholder="(optional)" />
+                          </label>
+                        </div>
+                        <label className="entity-field" style={{ maxWidth: 200 }}>
+                          <span className="entity-field-label">Expires In (seconds)</span>
+                          <input type="number" value={getField("auth.jwt.expiresInSeconds", 300)} onChange={(e) => setField("auth.jwt.expiresInSeconds", Number(e.target.value))} />
+                        </label>
+                      </div>
+                    ) : authMode === "apikey" ? (
+                      <div className="entity-card">
+                        <h3 className="entity-card-title">API Key Configuration</h3>
+                        <div className="entity-field-grid">
+                          <label className="entity-field">
+                            <span className="entity-field-label">Header Name</span>
+                            <input value={getField("auth.apikey.headerName", mod.auth?.apikey?.headerName ?? "")} onChange={(e) => setField("auth.apikey.headerName", e.target.value)} placeholder="x-api-key" />
+                          </label>
+                          <label className="entity-field">
+                            <span className="entity-field-label">Value Env Var</span>
+                            <input value={getField("auth.apikey.valueEnvVar", mod.auth?.apikey?.valueEnvVar ?? "")} onChange={(e) => setField("auth.apikey.valueEnvVar", e.target.value)} placeholder="MY_SERVICE_API_KEY" />
+                          </label>
+                        </div>
+                      </div>
+                    ) : authMode === "bearer" ? (
+                      <div className="entity-card">
+                        <h3 className="entity-card-title">Bearer Token Configuration</h3>
+                        <label className="entity-field">
+                          <span className="entity-field-label">Token Env Var</span>
+                          <input value={getField("auth.bearer.tokenEnvVar", mod.auth?.bearer?.tokenEnvVar ?? "")} onChange={(e) => setField("auth.bearer.tokenEnvVar", e.target.value)} placeholder="MY_SERVICE_BEARER_TOKEN" />
+                        </label>
+                      </div>
+                    ) : (
+                      <div className="entity-card">
+                        <p className="entity-hint">No authentication is configured for this module.</p>
+                      </div>
+                    )}
+                  </div>
+                ) : activeSection === "headers" ? (
+                  <div className="entity-section">
+                    <div className="entity-card">
+                      <h3 className="entity-card-title">Default Headers</h3>
+                      <p className="entity-hint">These headers are automatically included in every request for this module.</p>
+                      {(() => {
+                        const headers = getField<Record<string, string>>("defaultHeaders", mod.defaultHeaders ?? {});
+                        const entries = Object.entries(headers);
+
+                        return entries.length === 0 ? (
+                          <div className="default-headers-prompt">
+                            <p className="entity-hint" style={{ margin: 0 }}>No default headers configured.</p>
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() =>
+                                setField("defaultHeaders", {
+                                  "Cache-Control": "no-cache",
+                                  "User-Agent": "RepoApiWrapper/1.0",
+                                  "Accept": "*/*",
+                                  "Accept-Encoding": "gzip, deflate, br",
+                                  "Connection": "keep-alive",
+                                })
+                              }
+                            >
+                              Add default headers
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="entity-table">
+                              <div className="entity-table-header">
+                                <span className="entity-table-cell" style={{ flex: 1 }}>Key</span>
+                                <span className="entity-table-cell" style={{ flex: 2 }}>Value</span>
+                                <span className="entity-table-cell entity-table-action-col"></span>
+                              </div>
+                              {entries.map(([key, value], i) => (
+                                <div key={i} className="entity-table-row">
+                                  <span className="entity-table-cell" style={{ flex: 1 }}>
+                                    <input value={key} onChange={(e) => {
+                                      const newH = { ...headers };
+                                      delete newH[key];
+                                      newH[e.target.value] = value;
+                                      setField("defaultHeaders", newH);
+                                    }} placeholder="Header name" />
+                                  </span>
+                                  <span className="entity-table-cell" style={{ flex: 2 }}>
+                                    <input value={value} onChange={(e) => setField("defaultHeaders", { ...headers, [key]: e.target.value })} placeholder="Value" />
+                                  </span>
+                                  <span className="entity-table-cell entity-table-action-col">
+                                    <button type="button" className="remove-row-btn" onClick={() => {
+                                      const newH = { ...headers };
+                                      delete newH[key];
+                                      setField("defaultHeaders", newH);
+                                    }} title="Remove">&times;</button>
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                            <button type="button" className="ghost-button" style={{ marginTop: 8 }} onClick={() => {
+                              setField("defaultHeaders", { ...headers, "": "" });
+                            }}>+ Add header</button>
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                ) : activeSection === "variables" ? (
+                  <div className="entity-section">
+                    <div className="entity-card">
+                      <h3 className="entity-card-title">Collection Variables</h3>
+                      <p className="entity-hint">Module-level variables that can be referenced as <code>{"{{varName}}"}</code> in URLs, headers, query params, and request bodies. Sidebar environment variables override these.</p>
+                      {(() => {
+                        const vars = getField<Record<string, string>>("variables", mod.variables ?? {});
+                        const entries = Object.entries(vars);
+
+                        return entries.length === 0 ? (
+                          <div className="default-headers-prompt">
+                            <p className="entity-hint" style={{ margin: 0 }}>No variables configured yet.</p>
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() => setField("variables", { "": "" })}
+                            >
+                              + Add variable
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="entity-table">
+                              <div className="entity-table-header">
+                                <span className="entity-table-cell" style={{ flex: 1 }}>Name</span>
+                                <span className="entity-table-cell" style={{ flex: 2 }}>Value</span>
+                                <span className="entity-table-cell entity-table-action-col"></span>
+                              </div>
+                              {entries.map(([key, value], i) => (
+                                <div key={i} className="entity-table-row">
+                                  <span className="entity-table-cell" style={{ flex: 1 }}>
+                                    <input value={key} onChange={(e) => {
+                                      const newV = { ...vars };
+                                      delete newV[key];
+                                      newV[e.target.value] = value;
+                                      setField("variables", newV);
+                                    }} placeholder="Variable name" />
+                                  </span>
+                                  <span className="entity-table-cell" style={{ flex: 2 }}>
+                                    <input value={value} onChange={(e) => setField("variables", { ...vars, [key]: e.target.value })} placeholder="Value" />
+                                  </span>
+                                  <span className="entity-table-cell entity-table-action-col">
+                                    <button type="button" className="remove-row-btn" onClick={() => {
+                                      const newV = { ...vars };
+                                      delete newV[key];
+                                      setField("variables", newV);
+                                    }} title="Remove">&times;</button>
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                            <button type="button" className="ghost-button" style={{ marginTop: 8 }} onClick={() => {
+                              setField("variables", { ...vars, "": "" });
+                            }}>+ Add variable</button>
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* ── Endpoint Request Editor ────────────────────────────── */}
+        {tabs.length > 0 && selectedEndpoint && tabs.find((t) => t.id === activeTabId)?.type !== "module-config" ? (
           <>
             {/* URL bar */}
             <form className="url-bar" onSubmit={handleCreateRun}>
@@ -1802,8 +2120,10 @@ export function App() {
                     {selectedModule.environments[formState.targetEnvironment].baseUrl}
                   </span>
                 ) : null}
-                <input
+                <VarInput
                   className="url-path-input"
+                  resolvedVars={availableVarNames}
+                  urlMode
                   value={
                     formState.pathTemplate +
                     (() => {
@@ -2043,50 +2363,7 @@ export function App() {
 
                   <div className="query-params-section">
                     <span className="section-label">Request headers <span className="section-label-hint">Use <code>{"{{itemValue}}"}</code> to inject the current item</span></span>
-                    <div className="query-params-table">
-                      {formState.headers.map((row, i) => (
-                        <div key={i} className="query-param-row">
-                          <input
-                            className="query-param-key"
-                            placeholder="Header name"
-                            value={row.key}
-                            onChange={(e) => {
-                              const next = formState.headers.map((r, j) =>
-                                j === i ? { ...r, key: e.target.value } : r
-                              );
-                              const last = next[next.length - 1];
-                              if (last.key || last.value) next.push({ key: "", value: "" });
-                              setFormState((cur) => ({ ...cur, headers: next }));
-                            }}
-                          />
-                          <input
-                            className="query-param-value"
-                            placeholder="Value"
-                            value={row.value}
-                            onChange={(e) => {
-                              const next = formState.headers.map((r, j) =>
-                                j === i ? { ...r, value: e.target.value } : r
-                              );
-                              const last = next[next.length - 1];
-                              if (last.key || last.value) next.push({ key: "", value: "" });
-                              setFormState((cur) => ({ ...cur, headers: next }));
-                            }}
-                          />
-                          {(row.key || row.value) ? (
-                            <button
-                              type="button"
-                              className="remove-param-btn"
-                              onClick={() =>
-                                setFormState((cur) => ({
-                                  ...cur,
-                                  headers: cur.headers.filter((_, j) => j !== i)
-                                }))
-                              }
-                            >×</button>
-                          ) : <span className="remove-param-btn" />}
-                        </div>
-                      ))}
-                    </div>
+                    <KeyValueTable rows={formState.headers} onChange={(rows) => setFormState((cur) => ({ ...cur, headers: rows }))} keyPlaceholder="Header name" resolvedVars={availableVarNames} />
                     <p className="section-hint">Per-request headers override inherited headers. Content-Type is set automatically.</p>
                   </div>
                 </div>
@@ -2132,51 +2409,7 @@ export function App() {
 
                   <div className="query-params-section">
                     <span className="section-label">Query params <span className="section-label-hint">Use <code>{"{{itemValue}}"}</code> in values to inject the current item</span></span>
-                    <div className="query-params-table">
-                      {formState.queryParams.map((row, i) => (
-                        <div key={i} className="query-param-row">
-                          <input
-                            className="query-param-key"
-                            placeholder="Key"
-                            value={row.key}
-                            onChange={(e) => {
-                              const next = formState.queryParams.map((r, j) =>
-                                j === i ? { ...r, key: e.target.value } : r
-                              );
-                              // auto-add trailing empty row
-                              const last = next[next.length - 1];
-                              if (last.key || last.value) next.push({ key: "", value: "" });
-                              setFormState((cur) => ({ ...cur, queryParams: next }));
-                            }}
-                          />
-                          <input
-                            className="query-param-value"
-                            placeholder="Value"
-                            value={row.value}
-                            onChange={(e) => {
-                              const next = formState.queryParams.map((r, j) =>
-                                j === i ? { ...r, value: e.target.value } : r
-                              );
-                              const last = next[next.length - 1];
-                              if (last.key || last.value) next.push({ key: "", value: "" });
-                              setFormState((cur) => ({ ...cur, queryParams: next }));
-                            }}
-                          />
-                          {(row.key || row.value) ? (
-                            <button
-                              type="button"
-                              className="remove-param-btn"
-                              onClick={() =>
-                                setFormState((cur) => ({
-                                  ...cur,
-                                  queryParams: cur.queryParams.filter((_, j) => j !== i)
-                                }))
-                              }
-                            >×</button>
-                          ) : <span className="remove-param-btn" />}
-                        </div>
-                      ))}
-                    </div>
+                    <KeyValueTable rows={formState.queryParams} onChange={(rows) => setFormState((cur) => ({ ...cur, queryParams: rows }))} resolvedVars={availableVarNames} />
                   </div>
 
                   {isMultiToken ? (
@@ -2269,50 +2502,7 @@ export function App() {
                         {formState.bodyType === "multipart" ? "Form fields (multipart/form-data)" : "Form fields (x-www-form-urlencoded)"}
                         <span className="section-label-hint"> — Use <code>{"{{itemValue}}"}</code> or <code>{"{{varName}}"}</code> in values</span>
                       </span>
-                      <div className="query-params-table">
-                        {formState.formBodyRows.map((row, i) => (
-                          <div key={i} className="query-param-row">
-                            <input
-                              className="query-param-key"
-                              placeholder="Field name"
-                              value={row.key}
-                              onChange={(e) => {
-                                const next = formState.formBodyRows.map((r, j) =>
-                                  j === i ? { ...r, key: e.target.value } : r
-                                );
-                                const last = next[next.length - 1];
-                                if (last.key || last.value) next.push({ key: "", value: "" });
-                                setFormState((cur) => ({ ...cur, formBodyRows: next }));
-                              }}
-                            />
-                            <input
-                              className="query-param-value"
-                              placeholder="Value"
-                              value={row.value}
-                              onChange={(e) => {
-                                const next = formState.formBodyRows.map((r, j) =>
-                                  j === i ? { ...r, value: e.target.value } : r
-                                );
-                                const last = next[next.length - 1];
-                                if (last.key || last.value) next.push({ key: "", value: "" });
-                                setFormState((cur) => ({ ...cur, formBodyRows: next }));
-                              }}
-                            />
-                            {(row.key || row.value) ? (
-                              <button
-                                type="button"
-                                className="remove-param-btn"
-                                onClick={() =>
-                                  setFormState((cur) => ({
-                                    ...cur,
-                                    formBodyRows: cur.formBodyRows.filter((_, j) => j !== i),
-                                  }))
-                                }
-                              >×</button>
-                            ) : <span className="remove-param-btn" />}
-                          </div>
-                        ))}
-                      </div>
+                      <KeyValueTable rows={formState.formBodyRows} onChange={(rows) => setFormState((cur) => ({ ...cur, formBodyRows: rows }))} keyPlaceholder="Field name" resolvedVars={availableVarNames} />
                       <p className="section-hint">
                         {formState.bodyType === "multipart"
                           ? "Sent as multipart/form-data. Content-Type boundary is set automatically."
@@ -2325,10 +2515,26 @@ export function App() {
                         {formState.bodyType === "text" ? "Plain text body" : "JSON body"}
                         {selectedEndpoint.requestBodyDescription ? ` — ${selectedEndpoint.requestBodyDescription}` : ""}
                         <span className="section-label-hint"> — Use <code>{"{{itemValue}}"}</code> or <code>{"{{varName}}"}</code></span>
+                        {formState.bodyType === "json" ? (
+                          <button
+                            type="button"
+                            className="beautify-btn"
+                            onClick={() => {
+                              try {
+                                const parsed = JSON.parse(formState.requestBodyRaw);
+                                setFormState((cur) => ({ ...cur, requestBodyRaw: JSON.stringify(parsed, null, 2) }));
+                              } catch { /* ignore invalid json */ }
+                            }}
+                          >
+                            Beautify
+                          </button>
+                        ) : null}
                       </span>
-                      <textarea
+                      <VarTextarea
                         rows={10}
                         value={formState.requestBodyRaw}
+                        resolvedVars={availableVarNames}
+                        mono
                         onChange={(e) =>
                           setFormState((cur) => ({ ...cur, requestBodyRaw: e.target.value }))
                         }
@@ -2443,6 +2649,26 @@ export function App() {
                       placeholder="401,403,500"
                     />
                   </label>
+                  <label className="param-field">
+                    <span>Timeout (ms)</span>
+                    <input
+                      value={formState.timeoutMs}
+                      onChange={(e) =>
+                        setFormState((cur) => ({ ...cur, timeoutMs: e.target.value }))
+                      }
+                      placeholder="30000 (default)"
+                    />
+                  </label>
+                  <label className="param-field param-field-inline">
+                    <input
+                      type="checkbox"
+                      checked={formState.followRedirects}
+                      onChange={(e) =>
+                        setFormState((cur) => ({ ...cur, followRedirects: e.target.checked }))
+                      }
+                    />
+                    <span>Follow redirects</span>
+                  </label>
                 </div>
               )}
             </div>
@@ -2478,6 +2704,14 @@ export function App() {
                         type="button"
                       >
                         Config
+                      </button>
+                      <button
+                        className="ghost-button replay-btn"
+                        onClick={() => void handleReplayRun()}
+                        type="button"
+                        title="Restore this run's config into the form"
+                      >
+                        Replay
                       </button>
                     </div>
                     <div className="response-meta">
@@ -2536,6 +2770,29 @@ export function App() {
                           >
                             Stop
                           </button>
+                        ) : null}
+                        {runDetail.status === "COMPLETED" || runDetail.status === "STOPPED" || runDetail.status === "FAILED" ? (
+                          <span className="export-dropdown">
+                            <button
+                              className="ghost-button"
+                              onClick={() => {
+                                window.open(`/api/runs/${runDetail.id}/export?format=json`, "_blank");
+                              }}
+                              type="button"
+                            >
+                              Export
+                            </button>
+                            <button
+                              className="ghost-button ghost-button-sm"
+                              onClick={() => {
+                                window.open(`/api/runs/${runDetail.id}/export?format=csv`, "_blank");
+                              }}
+                              type="button"
+                              title="Export as CSV"
+                            >
+                              CSV
+                            </button>
+                          </span>
                         ) : null}
                       </div>
                     </div>
@@ -2654,6 +2911,13 @@ export function App() {
                                   #{selectedItem.sequence}
                                 </span>
                               ) : null}
+                              <input
+                                className="inspector-search"
+                                type="text"
+                                placeholder="Search response…"
+                                value={inspectorSearch}
+                                onChange={(e) => setInspectorSearch(e.target.value)}
+                              />
                             </div>
                             {selectedItem ? (() => {
                               const parsedResp = parseItemResponse(selectedItem.response);
@@ -2669,7 +2933,9 @@ export function App() {
                                 <div className="inspector-meta">
                                   <span>{selectedItem.itemValue}</span>
                                   <span className={`status-tag status-${selectedItem.status.toLowerCase()}`}>{selectedItem.lastHttpStatus ?? "\u2013"}</span>
-                                  {formatItemDuration(selectedItem) ? (
+                                  {parsedResp.durationMs !== null ? (
+                                    <span className="inspector-duration" title="HTTP request time">{parsedResp.durationMs < 1000 ? `${parsedResp.durationMs}ms` : `${(parsedResp.durationMs / 1000).toFixed(2)}s`}</span>
+                                  ) : formatItemDuration(selectedItem) ? (
                                     <span className="inspector-duration">{formatItemDuration(selectedItem)}</span>
                                   ) : null}
                                   {parsedResp.size !== null ? (
@@ -2695,7 +2961,7 @@ export function App() {
                                       {copyIcon}
                                     </button>
                                   </div>
-                                  <pre dangerouslySetInnerHTML={{ __html: syntaxHighlightJson(parsedResp.body) }} />
+                                  <pre dangerouslySetInnerHTML={{ __html: highlightSearch(syntaxHighlightJson(parsedResp.body), inspectorSearch) }} />
                                 </div>
                                 {respHeaderEntries.length > 0 ? (
                                   <div className="inspector-block">
@@ -2778,25 +3044,7 @@ export function App() {
                         </summary>
                         <div className="run-history-list">
                           {endpointRuns.map((run) => (
-                            <button
-                              className={`run-history-item ${selectedRunId === run.id ? "active" : ""}`}
-                              key={run.id}
-                              onClick={() => setSelectedRunId(run.id)}
-                              type="button"
-                            >
-                              <div className="run-history-item-top">
-                                <strong>{run.label ?? run.action}</strong>
-                                <span
-                                  className={`status-tag status-${run.status.toLowerCase()}`}
-                                >
-                                  {run.status.toLowerCase()}
-                                </span>
-                              </div>
-                              <span className="run-history-item-meta">
-                                {run.completedItems}/{run.totalItems} done &middot;{" "}
-                                {run.failedItems} failed &middot; {formatDate(run.createdAt)}
-                              </span>
-                            </button>
+                            <RunHistoryItem key={run.id} run={run} isActive={selectedRunId === run.id} onClick={() => setSelectedRunId(run.id)} />
                           ))}
                         </div>
                       </details>
@@ -2828,25 +3076,7 @@ export function App() {
                     </summary>
                     <div className="run-history-list">
                       {endpointRuns.map((run) => (
-                        <button
-                          className={`run-history-item ${selectedRunId === run.id ? "active" : ""}`}
-                          key={run.id}
-                          onClick={() => setSelectedRunId(run.id)}
-                          type="button"
-                        >
-                          <div className="run-history-item-top">
-                            <strong>{run.label ?? run.action}</strong>
-                            <span
-                              className={`status-tag status-${run.status.toLowerCase()}`}
-                            >
-                              {run.status.toLowerCase()}
-                            </span>
-                          </div>
-                          <span className="run-history-item-meta">
-                            {run.completedItems}/{run.totalItems} done &middot;{" "}
-                            {run.failedItems} failed &middot; {formatDate(run.createdAt)}
-                          </span>
-                        </button>
+                        <RunHistoryItem key={run.id} run={run} isActive={selectedRunId === run.id} onClick={() => setSelectedRunId(run.id)} />
                       ))}
                     </div>
                   </details>
@@ -2858,12 +3088,25 @@ export function App() {
           <div className="empty-workspace">
             <div className="empty-workspace-icon">
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                {tabs.length === 0 ? (
+                  <><rect x="2" y="3" width="20" height="14" rx="2" ry="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></>
+                ) : (
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                )}
               </svg>
             </div>
             <div>
-              <p className="empty-workspace-label">Select an endpoint</p>
-              <p>Choose an endpoint from the collection sidebar to configure and run requests.</p>
+              {tabs.length === 0 ? (
+                <>
+                  <p className="empty-workspace-label">No open tabs</p>
+                  <p>Select an endpoint from the sidebar or click <strong>+</strong> to open a new tab.</p>
+                </>
+              ) : (
+                <>
+                  <p className="empty-workspace-label">Select an endpoint</p>
+                  <p>Choose an endpoint from the collection sidebar to configure and run requests.</p>
+                </>
+              )}
             </div>
           </div>
         )}

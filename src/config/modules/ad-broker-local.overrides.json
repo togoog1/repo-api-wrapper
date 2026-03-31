@@ -1,0 +1,27 @@
+{
+  "customFolders": [
+    [
+      "test"
+    ]
+  ],
+  "addedEndpoints": [
+    {
+      "slug": "test-11",
+      "action": "/test/test",
+      "label": "test",
+      "description": "",
+      "method": "GET",
+      "pathTemplate": "/test/test",
+      "folder": [
+        "test"
+      ]
+    }
+  ],
+  "defaultHeaders": {
+    "Cache-Control": "no-cache",
+    "User-Agent": "RepoApiWrapper/1.0",
+    "Accept": "*/*",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive"
+  }
+}

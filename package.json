@@ -9,8 +9,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && vite build --config web/vite.config.ts",
-    "dev": "node --env-file=.env --import tsx src/server.ts & vite --config web/vite.config.ts",
-    "dev:api": "node --env-file=.env --import tsx src/server.ts",
+    "dev": "node --watch --env-file=.env --import tsx src/server.ts & vite --config web/vite.config.ts",
+    "dev:api": "node --watch --env-file=.env --import tsx src/server.ts",
     "dev:web": "vite --config web/vite.config.ts",
     "cli": "node --env-file=.env --import tsx src/cli.ts",
     "prisma:generate": "prisma generate",

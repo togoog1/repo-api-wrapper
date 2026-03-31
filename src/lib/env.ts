@@ -72,9 +72,6 @@ async function generateJwtToken(
   if (moduleDefinition.auth.secretEnvVar) {
     secretNames.push(moduleDefinition.auth.secretEnvVar);
   }
-  if (moduleDefinition.auth.legacySecretEnvVar) {
-    secretNames.push(moduleDefinition.auth.legacySecretEnvVar);
-  }
 
   const secret =
     getFirstDefinedEnv(...secretNames) ?? requiredEnv(moduleDefinition.auth.secretEnvVar ?? "JWT_SECRET");
@@ -189,7 +186,7 @@ export function getEnv(moduleSlug?: string): EnvConfig {
 function isAuthConfigured(mod: import("../config/module-types.js").ModuleDefinition): boolean {
   switch (mod.auth.mode) {
     case "jwt": {
-      const names = [mod.auth.secretEnvVar, mod.auth.legacySecretEnvVar].filter(Boolean) as string[];
+      const names = [mod.auth.secretEnvVar].filter(Boolean) as string[];
       return names.length > 0 && Boolean(getFirstDefinedEnv(...names));
     }
     case "apikey":

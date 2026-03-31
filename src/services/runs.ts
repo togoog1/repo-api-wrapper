@@ -177,6 +177,7 @@ export async function createAndStartHttpRequestRun(
     moduleSlug?: string;
     endpointSlug?: string;
     inputListId?: string;
+    disabledDefaultHeaders?: string[];
   }
 ): Promise<string> {
   const runId = await createHttpRequestRun(input);
@@ -245,6 +246,8 @@ export async function createRetryRunFromFailures(runId: string): Promise<string>
       ? config.stopOnHttpStatuses.filter((value): value is number => typeof value === "number")
       : [],
     skipAuth: typeof config.skipAuth === "boolean" ? config.skipAuth : false,
+    timeoutMs: typeof config.timeoutMs === "number" ? config.timeoutMs : undefined,
+    followRedirects: typeof config.followRedirects === "boolean" ? config.followRedirects : true,
   });
 }
 
@@ -446,4 +449,53 @@ export async function listRunEvents(runId: string, limit = 80) {
       createdAt: true
     }
   });
+}
+
+export async function exportRunResults(runId: string, format: "json" | "csv") {
+  const run = await prisma.run.findUnique({
+    where: { id: runId },
+    select: { id: true, label: true, moduleSlug: true, status: true, config: true }
+  });
+  if (!run) throw new Error(`Run not found: ${runId}`);
+
+  const items = await prisma.runItem.findMany({
+    where: { runId },
+    orderBy: { sequence: "asc" },
+    select: {
+      sequence: true,
+      itemValue: true,
+      status: true,
+      attemptCount: true,
+      lastHttpStatus: true,
+      lastError: true,
+      request: true,
+      response: true,
+      startedAt: true,
+      finishedAt: true
+    }
+  });
+
+  if (format === "csv") {
+    const header = "sequence,itemValue,status,httpStatus,attemptCount,error,startedAt,finishedAt";
+    const rows = items.map((item) => {
+      const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
+      return [
+        item.sequence,
+        escape(item.itemValue),
+        item.status,
+        item.lastHttpStatus ?? "",
+        item.attemptCount,
+        escape(item.lastError ?? ""),
+        item.startedAt ?? "",
+        item.finishedAt ?? ""
+      ].join(",");
+    });
+    return { contentType: "text/csv", body: [header, ...rows].join("\n"), filename: `${run.label ?? run.id}.csv` };
+  }
+
+  return {
+    contentType: "application/json",
+    body: JSON.stringify({ run: { id: run.id, label: run.label, status: run.status, moduleSlug: run.moduleSlug }, items }, null, 2),
+    filename: `${run.label ?? run.id}.json`
+  };
 }

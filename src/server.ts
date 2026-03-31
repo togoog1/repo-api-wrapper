@@ -11,7 +11,15 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 import { appConfig } from "./config/app.js";
-import { loadModules } from "./config/module-loader.js";
+import {
+  addEndpointToModule,
+  addFolderToModule,
+  bakeModuleOverrides,
+  getModuleOverrides,
+  getSupportedModules,
+  loadModules,
+  saveModuleOverrides
+} from "./config/module-loader.js";
 import { getPublicRuntimeConfig } from "./lib/env.js";
 import { prisma } from "./lib/prisma.js";
 import { targetEnvironmentSchema } from "./lib/target-environment.js";
@@ -25,6 +33,7 @@ import {
 import {
   createAndStartHttpRequestRun,
   createRetryRunFromFailures,
+  exportRunResults,
   getRunOverview,
   listRunEvents,
   listRunItems,
@@ -64,7 +73,9 @@ const createRunRequestSchema = z
     stopAfterConsecutiveFailures: z.number().int().positive().optional(),
     stopOnHttpStatuses: z.array(z.number().int().min(100).max(599)).default([]),
     skipAuth: z.boolean().default(false),
-    disabledDefaultHeaders: z.array(z.string()).default([])
+    disabledDefaultHeaders: z.array(z.string()).default([]),
+    timeoutMs: z.number().int().min(0).optional(),
+    followRedirects: z.boolean().default(true)
   })
   ;
 
@@ -325,6 +336,119 @@ async function buildServer() {
     }
   });
 
+  app.get("/api/runs/:runId/export", async (request, reply) => {
+    try {
+      const { runId } = request.params as { runId: string };
+      const query = request.query as { format?: string };
+      const format = query.format === "csv" ? "csv" : "json";
+      const result = await exportRunResults(runId, format);
+      return reply
+        .header("content-type", result.contentType)
+        .header("content-disposition", `attachment; filename="${result.filename}"`)
+        .send(result.body);
+    } catch (error) {
+      const normalized = normalizeError(error);
+      return reply.status(normalized.statusCode).send({
+        error: normalized.message
+      });
+    }
+  });
+
+
+  // ── Module config overrides ──────────────────────────────────────
+
+  app.get("/api/modules/:slug/config", async (request, reply) => {
+    try {
+      const { slug } = request.params as { slug: string };
+      const mod = getSupportedModules().find((m) => m.slug === slug);
+      if (!mod) return reply.status(404).send({ error: `Module not found: ${slug}` });
+      const overrides = getModuleOverrides(slug);
+      return { module: mod, overrides, hasOverrides: Object.keys(overrides).length > 0 };
+    } catch (error) {
+      const normalized = normalizeError(error);
+      return reply.status(normalized.statusCode).send({ error: normalized.message });
+    }
+  });
+
+  app.patch("/api/modules/:slug/config", async (request, reply) => {
+    try {
+      const { slug } = request.params as { slug: string };
+      const mod = getSupportedModules().find((m) => m.slug === slug);
+      if (!mod) return reply.status(404).send({ error: `Module not found: ${slug}` });
+      const body = request.body as Record<string, unknown>;
+      if (!body || typeof body !== "object") {
+        return reply.status(400).send({ error: "Body must be a JSON object" });
+      }
+      await saveModuleOverrides(slug, body);
+      return { ok: true };
+    } catch (error) {
+      const normalized = normalizeError(error);
+      return reply.status(normalized.statusCode).send({ error: normalized.message });
+    }
+  });
+
+  app.post("/api/modules/:slug/endpoints", async (request, reply) => {
+    try {
+      const { slug } = request.params as { slug: string };
+      const mod = getSupportedModules().find((m) => m.slug === slug);
+      if (!mod) return reply.status(404).send({ error: `Module not found: ${slug}` });
+      const body = request.body as { label: string; method: string; pathTemplate: string; folder?: string[] };
+      if (!body?.label || !body?.method || !body?.pathTemplate) {
+        return reply.status(400).send({ error: "label, method, and pathTemplate are required" });
+      }
+      const baseSlug = body.label.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      // Auto-deduplicate slug with numeric suffix on collision
+      let epSlug = baseSlug;
+      let suffix = 2;
+      while (mod.endpoints.some((e) => e.slug === epSlug)) {
+        epSlug = `${baseSlug}-${suffix}`;
+        suffix++;
+      }
+      await addEndpointToModule(slug, {
+        slug: epSlug,
+        action: body.pathTemplate,
+        label: body.label,
+        description: "",
+        method: body.method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+        pathTemplate: body.pathTemplate,
+        folder: body.folder,
+      });
+      return { ok: true, endpointSlug: epSlug };
+    } catch (error) {
+      const normalized = normalizeError(error);
+      return reply.status(normalized.statusCode).send({ error: normalized.message });
+    }
+  });
+
+  app.post("/api/modules/:slug/folders", async (request, reply) => {
+    try {
+      const { slug } = request.params as { slug: string };
+      const mod = getSupportedModules().find((m) => m.slug === slug);
+      if (!mod) return reply.status(404).send({ error: `Module not found: ${slug}` });
+      const body = request.body as { folderPath: string[] };
+      if (!body?.folderPath || !Array.isArray(body.folderPath) || body.folderPath.length === 0) {
+        return reply.status(400).send({ error: "folderPath is required (non-empty string array)" });
+      }
+      await addFolderToModule(slug, body.folderPath);
+      return { ok: true };
+    } catch (error) {
+      const normalized = normalizeError(error);
+      return reply.status(normalized.statusCode).send({ error: normalized.message });
+    }
+  });
+
+  app.post("/api/modules/:slug/bake", async (request, reply) => {
+    try {
+      const { slug } = request.params as { slug: string };
+      const mod = getSupportedModules().find((m) => m.slug === slug);
+      if (!mod) return reply.status(404).send({ error: `Module not found: ${slug}` });
+      const result = await bakeModuleOverrides(slug);
+      return { ok: true, backupPath: result.backupPath };
+    } catch (error) {
+      const normalized = normalizeError(error);
+      return reply.status(normalized.statusCode).send({ error: normalized.message });
+    }
+  });
 
   if (existsSync(clientDistPath)) {
     await app.register(fastifyStatic, {

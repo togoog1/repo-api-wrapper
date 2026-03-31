@@ -34,7 +34,9 @@ export const httpRequestConfigSchema = z.object({
   stopAfterFailures: z.number().int().positive().optional(),
   stopAfterConsecutiveFailures: z.number().int().positive().optional(),
   stopOnHttpStatuses: z.array(z.number().int().min(100).max(599)).default([]),
-  skipAuth: z.boolean().default(false)
+  skipAuth: z.boolean().default(false),
+  timeoutMs: z.number().int().min(0).optional(),
+  followRedirects: z.boolean().default(true)
 });
 
 export type HttpRequestRunConfig = z.infer<typeof httpRequestConfigSchema>;
@@ -62,7 +64,8 @@ export const httpRequestAction: ActionDefinition<HttpRequestRunConfig> = {
   configSchema: httpRequestConfigSchema,
   async execute({ itemValue, config, env }) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), env.apiTimeoutMs);
+    const effectiveTimeout = config.timeoutMs ?? env.apiTimeoutMs;
+    const timeout = setTimeout(() => controller.abort(), effectiveTimeout);
     const apiBaseUrl = env.resolveApiBaseUrl(config.targetEnvironment);
     const authHeaders = config.skipAuth ? {} : await env.getAuthHeaders(config.targetEnvironment);
     const method = config.method;
@@ -117,6 +120,7 @@ export const httpRequestAction: ActionDefinition<HttpRequestRunConfig> = {
     }
 
     try {
+      const fetchStart = Date.now();
       const response = await fetch(endpoint, {
         method,
         headers: {
@@ -125,7 +129,8 @@ export const httpRequestAction: ActionDefinition<HttpRequestRunConfig> = {
           ...customHeaders
         },
         body: fetchBody,
-        signal: controller.signal
+        signal: controller.signal,
+        redirect: config.followRedirects ? "follow" : "manual"
       });
 
       // Capture response headers
@@ -165,7 +170,8 @@ export const httpRequestAction: ActionDefinition<HttpRequestRunConfig> = {
         response: {
           body: parsedBody,
           headers: responseHeaders,
-          size: responseSizeBytes
+          size: responseSizeBytes,
+          durationMs: Date.now() - fetchStart
         },
         error: response.ok ? undefined : `HTTP ${response.status}`,
         retryable: response.status === 429 || response.status >= 500

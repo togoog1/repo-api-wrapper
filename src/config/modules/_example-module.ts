@@ -45,7 +45,6 @@ export const exampleModule: ModuleDefinition = {
     mode: "jwt",
     secretEnvVar: "MY_SERVICE_JWT_SECRET",
     // Optional: fall back to an older env var name during migration
-    // legacySecretEnvVar: "OLD_MY_SERVICE_JWT_SECRET",
     jwt: {
       email: "service-account@example.com",
       subject: undefined,

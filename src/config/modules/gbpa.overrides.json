@@ -1,0 +1,12 @@
+{
+  "addedEndpoints": [
+    {
+      "slug": "test",
+      "action": "test",
+      "label": "test",
+      "description": "",
+      "method": "GET",
+      "pathTemplate": "test"
+    }
+  ]
+}
