@@ -39,6 +39,20 @@ export const httpRequestConfigSchema = z.object({
 export type HttpRequestRunConfig = z.infer<typeof httpRequestConfigSchema>;
 
 function interpolateTemplate(template: string, itemValue: string): string {
+  // For multi-token items (JSON object), also substitute {{tokenName}}
+  try {
+    const parsed = JSON.parse(itemValue) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const valueMap = parsed as Record<string, string>;
+      // Replace {{tokenName}} for each key, and {{itemValue}} with first value
+      const firstValue = Object.values(valueMap)[0] ?? itemValue;
+      return template
+        .replace(/\{\{itemValue\}\}/gu, firstValue)
+        .replace(/\{\{([a-z][a-z0-9_]*)\}\}/giu, (_, name: string) => valueMap[name] ?? `{{${name}}}`);
+    }
+  } catch {
+    // plain value
+  }
   return template.replace(/\{\{itemValue\}\}/gu, itemValue);
 }
 

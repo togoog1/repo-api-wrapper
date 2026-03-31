@@ -57,6 +57,7 @@ interface ConvertedEndpoint {
   description: string;
   method: string;
   pathTemplate: string;
+  folder: string[];
   queryParams?: Record<string, string>;
   requestBodyDescription?: string;
   notes?: string;
@@ -117,15 +118,14 @@ function extractBodyDescription(body: PostmanBody | undefined): string | undefin
   return undefined;
 }
 
-function flattenItems(items: PostmanItem[], prefix?: string): Array<{ item: PostmanItem; folder: string }> {
-  const results: Array<{ item: PostmanItem; folder: string }> = [];
+function flattenItems(items: PostmanItem[], path: string[] = []): Array<{ item: PostmanItem; folderPath: string[] }> {
+  const results: Array<{ item: PostmanItem; folderPath: string[] }> = [];
   for (const item of items) {
-    const name = prefix ? `${prefix} / ${item.name ?? ""}` : (item.name ?? "");
     if (item.request) {
-      results.push({ item, folder: prefix ?? "" });
+      results.push({ item, folderPath: path });
     }
     if (item.item) {
-      results.push(...flattenItems(item.item, item.name ?? ""));
+      results.push(...flattenItems(item.item, [...path, item.name ?? ""]));
     }
   }
   return results;
@@ -156,7 +156,7 @@ function convertCollection(collection: PostmanCollection): {
   const seenSlugs = new Set<string>();
   const endpoints: ConvertedEndpoint[] = [];
 
-  for (const { item, folder } of flat) {
+  for (const { item, folderPath } of flat) {
     const req = item.request;
     if (!req) continue;
 
@@ -174,18 +174,18 @@ function convertCollection(collection: PostmanCollection): {
 
     const queryParams = extractQueryParams(req.url);
     const bodyDesc = extractBodyDescription(req.body);
-    const descParts: string[] = [];
-    if (folder) descParts.push(`Folder: ${folder}`);
-    if (typeof req.description === "string" && req.description) {
-      descParts.push(req.description);
-    }
+    const description =
+      (typeof req.description === "string" && req.description)
+        ? req.description
+        : `${method} ${pathTemplate}`;
 
     endpoints.push({
       slug,
       label: item.name ?? slug,
-      description: descParts.join(". ") || `${method} ${pathTemplate}`,
+      description,
       method,
       pathTemplate,
+      folder: folderPath,
       queryParams,
       requestBodyDescription: bodyDesc,
     });
@@ -245,6 +245,9 @@ function generateModuleFile(opts: {
     lines.push(`      description: ${JSON.stringify(ep.description)},`);
     lines.push(`      method: ${JSON.stringify(ep.method)},`);
     lines.push(`      pathTemplate: ${JSON.stringify(ep.pathTemplate)},`);
+    if (ep.folder.length > 0) {
+      lines.push(`      folder: ${JSON.stringify(ep.folder)},`);
+    }
     if (ep.requestBodyDescription) {
       lines.push(`      requestBodyDescription: ${JSON.stringify(ep.requestBodyDescription)},`);
     }

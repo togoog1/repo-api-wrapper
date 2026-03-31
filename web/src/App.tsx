@@ -86,6 +86,7 @@ interface CreateRunFormState {
   inputListId: string;
   label: string;
   idsRaw: string;
+  tokenValues: Record<string, string>;
   targetEnvironment: TargetEnvironment;
   method: string;
   pathTemplate: string;
@@ -112,6 +113,7 @@ interface ModuleEndpointCatalog {
   description: string;
   method: string;
   pathTemplate: string;
+  folder?: string[];
   requestBodyDescription?: string;
   notes?: string;
   defaultRunLabel?: string;
@@ -166,6 +168,7 @@ const defaultFormState: CreateRunFormState = {
   inputListId: "",
   label: "",
   idsRaw: "",
+  tokenValues: {},
   targetEnvironment: "staging",
   method: "POST",
   pathTemplate: "/:id",
@@ -204,10 +207,9 @@ function formatRuntime(startedAt: string | null, finishedAt: string | null): str
   return minutes === 0 ? `${remainder}s` : `${minutes}m ${remainder}s`;
 }
 
-function extractPathParamName(pathTemplate: string): string | null {
-  const match = pathTemplate.match(/:[a-z][a-z0-9_]*|\{([a-z][a-z0-9_]*)\}/iu);
-  if (!match) return null;
-  return match[0].replace(/^[:{]|\}$/gu, "");
+function extractAllPathTokens(pathTemplate: string): string[] {
+  const matches = pathTemplate.match(/:[a-z][a-z0-9_]*|\{[a-z][a-z0-9_]*\}/giu) ?? [];
+  return [...new Set(matches.map((m) => m.replace(/^[:{]|\}$/gu, "")))];
 }
 
 function parseIdList(raw: string): string[] {
@@ -283,14 +285,29 @@ function buildPreviewUrl(input: {
   baseUrl?: string;
   pathTemplate: string;
   idsRaw: string;
+  tokenValues?: Record<string, string>;
   queryParams?: QueryParamRow[];
   envVars?: QueryParamRow[];
 }): string {
   const ev = input.envVars ?? [];
-  const sampleId = parseIdList(input.idsRaw)[0] ?? "12345";
   const rawPath = applyEnvVars(input.pathTemplate.trim(), ev);
   const normalizedPath = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
-  const resolved = normalizedPath.replace(/:[a-z][a-z0-9_]*|\{[a-z][a-z0-9_]*\}/giu, String(sampleId));
+  const tokens = extractAllPathTokens(normalizedPath);
+  const tv = input.tokenValues ?? {};
+
+  let resolved: string;
+  if (tokens.length > 1) {
+    // Multi-token: substitute each token individually from tokenValues
+    resolved = normalizedPath.replace(/:[a-z][a-z0-9_]*|\{[a-z][a-z0-9_]*\}/giu, (match) => {
+      const name = match.replace(/^[:{]|\}$/gu, "");
+      const sample = parseIdList(tv[name] ?? "")[0] ?? name;
+      return sample;
+    });
+  } else {
+    const sampleId = parseIdList(input.idsRaw)[0] ?? "12345";
+    resolved = normalizedPath.replace(/:[a-z][a-z0-9_]*|\{[a-z][a-z0-9_]*\}/giu, String(sampleId));
+  }
+
   const activeParams = (input.queryParams ?? []).filter((p) => p.key.trim());
   try {
     const url = new URL(resolved, input.baseUrl ?? "http://x");
@@ -353,32 +370,56 @@ function getSelectedEndpoint(
   return mod.endpoints.find((e) => e.slug === slug) ?? mod.endpoints[0] ?? null;
 }
 
+interface NavFolderNode {
+  name: string;
+  key: string;
+  children: NavFolderNode[];
+  endpoints: ModuleEndpointCatalog[];
+}
+
 function getEndpointPathGroup(pathTemplate: string): string {
   const normalized = pathTemplate.trim().startsWith("/")
     ? pathTemplate.trim()
     : `/${pathTemplate.trim()}`;
   const [first] = normalized.split("/").filter(Boolean);
-  return first ? `/${first}` : "/";
+  return first ? first : "misc";
 }
 
-function groupEndpointsByPath(
-  endpoints: ModuleEndpointCatalog[]
-): Array<{ group: string; endpoints: ModuleEndpointCatalog[] }> {
-  const groups = new Map<string, ModuleEndpointCatalog[]>();
-  for (const ep of endpoints) {
-    const group = getEndpointPathGroup(ep.pathTemplate);
-    const arr = groups.get(group) ?? [];
-    arr.push(ep);
-    groups.set(group, arr);
+function buildFolderTree(moduleKey: string, endpoints: ModuleEndpointCatalog[]): NavFolderNode {
+  const root: NavFolderNode = { name: "", key: moduleKey, children: [], endpoints: [] };
+
+  function getOrCreateChild(parent: NavFolderNode, name: string): NavFolderNode {
+    let child = parent.children.find((c) => c.name === name);
+    if (!child) {
+      child = { name, key: `${parent.key}/${name}`, children: [], endpoints: [] };
+      parent.children.push(child);
+    }
+    return child;
   }
-  return [...groups.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([group, eps]) => ({
-      group,
-      endpoints: eps.sort((a, b) =>
-        `${a.method} ${a.label}`.localeCompare(`${b.method} ${b.label}`)
-      ),
-    }));
+
+  for (const ep of endpoints) {
+    const folderPath =
+      ep.folder && ep.folder.length > 0
+        ? ep.folder
+        : [getEndpointPathGroup(ep.pathTemplate)];
+
+    let node = root;
+    for (const part of folderPath) {
+      node = getOrCreateChild(node, part);
+    }
+    node.endpoints.push(ep);
+  }
+
+  function sortNode(n: NavFolderNode) {
+    n.children.sort((a, b) => a.name.localeCompare(b.name));
+    n.endpoints.sort((a, b) =>
+      `${a.method} ${a.label}`.localeCompare(`${b.method} ${b.label}`)
+    );
+    for (const c of n.children) sortNode(c);
+  }
+  sortNode(root);
+
+  return root;
 }
 
 function applyCatalogDefaults(input: {
@@ -430,6 +471,8 @@ function applyCatalogDefaults(input: {
     moduleSlug: input.moduleDefinition.slug,
     endpointSlug: ep?.slug ?? "",
     inputListId: "",
+    idsRaw: "",
+    tokenValues: {},
     label: input.current.label || ep?.defaultRunLabel || "",
     targetEnvironment: env,
     method: typeof cfg.method === "string" ? cfg.method : (ep?.method ?? "POST"),
@@ -634,9 +677,9 @@ export function App() {
   const selectedModule = getSelectedModule(modules, formState.moduleSlug);
   const selectedEndpoint = getSelectedEndpoint(selectedModule, formState.endpointSlug);
 
-  const navGroupsByModule = useMemo(() => {
+  const navTreeByModule = useMemo(() => {
     const q = navSearch.toLowerCase();
-    const result = new Map<string, ReturnType<typeof groupEndpointsByPath>>();
+    const result = new Map<string, NavFolderNode>();
     for (const mod of modules) {
       const filtered = q
         ? mod.endpoints.filter(
@@ -648,14 +691,16 @@ export function App() {
           )
         : mod.endpoints;
       if (filtered.length > 0 || !q) {
-        result.set(mod.slug, groupEndpointsByPath(filtered));
+        result.set(mod.slug, buildFolderTree(mod.slug, filtered));
       }
     }
     return result;
   }, [modules, navSearch]);
 
-  // Keep backward compat for places that reference navGroups for the selected module
-  const navGroups = navGroupsByModule.get(formState.moduleSlug) ?? [];
+  // Count visible endpoints in a tree node (for search compat)
+  function countTreeEndpoints(node: NavFolderNode): number {
+    return node.endpoints.length + node.children.reduce((s, c) => s + countTreeEndpoints(c), 0);
+  }
 
   const endpointRuns = useMemo(() => {
     if (!selectedEndpoint) return [];
@@ -688,20 +733,24 @@ export function App() {
     ? Math.round((runDetail.completedItems / Math.max(runDetail.totalItems, 1)) * 100)
     : 0;
   const selectedItem = items.find((i) => i.id === selectedItemId) ?? null;
+  const pathTokens = extractAllPathTokens(formState.pathTemplate);
+  const isMultiToken = pathTokens.length > 1;
   const previewUrl = buildPreviewUrl({
     baseUrl: selectedModule?.environments[formState.targetEnvironment]?.baseUrl,
     pathTemplate: formState.pathTemplate,
     idsRaw: formState.idsRaw,
+    tokenValues: formState.tokenValues,
     queryParams: formState.queryParams,
     envVars,
   });
-  const idCount = parseIdList(formState.idsRaw).length;
-  const pathParamName = extractPathParamName(formState.pathTemplate);
-  const idsLabel = pathParamName
-    ? pathParamName.replace(/_/gu, " ")
+  const idCount = isMultiToken
+    ? Math.min(...pathTokens.map((t) => parseIdList(formState.tokenValues[t] ?? "").length))
+    : parseIdList(formState.idsRaw).length;
+  const idsLabel = pathTokens.length === 1
+    ? pathTokens[0].replace(/_/gu, " ")
     : "IDs";
-  const idsPlaceholder = pathParamName
-    ? `101, 204, 330 — one ${pathParamName} per request`
+  const idsPlaceholder = pathTokens.length === 1
+    ? `101, 204, 330 — one ${pathTokens[0]} per request`
     : "101, 204, 330 or newline separated";
 
   /* handlers */
@@ -714,12 +763,16 @@ export function App() {
     });
   }
 
-  // Auto-open all folders on first load
+  // Auto-open all top-level folders on first load
   useEffect(() => {
-    if (navGroups.length > 0 && openFolders.size === 0) {
-      setOpenFolders(new Set(navGroups.map((g) => g.group)));
+    if (modules.length > 0 && openFolders.size === 0) {
+      const keys = new Set<string>();
+      for (const tree of navTreeByModule.values()) {
+        for (const child of tree.children) keys.add(child.key);
+      }
+      if (keys.size > 0) setOpenFolders(keys);
     }
-  }, [navGroups.length]);
+  }, [modules.length]);
 
   function clearRunState() {
     setSelectedRunId(null);
@@ -861,12 +914,29 @@ export function App() {
       const mergedHeaders = { ...moduleDefaultHeaders, ...perRequestHeaders };
       const headers = Object.keys(mergedHeaders).length > 0 ? mergedHeaders : undefined;
 
+      // Build itemValues from single token (idsRaw) or multi-token (tokenValues, zipped)
+      const pathTokens = extractAllPathTokens(formState.pathTemplate);
+      let itemValues: string[];
+      if (pathTokens.length > 1) {
+        const columns = pathTokens.map((t) => parseIdList(formState.tokenValues[t] ?? ""));
+        const rowCount = Math.max(1, Math.min(...columns.map((c) => c.length)));
+        itemValues = Array.from({ length: rowCount }, (_, i) => {
+          const obj: Record<string, string> = {};
+          for (const [ci, token] of pathTokens.entries()) {
+            obj[token] = columns[ci][i] ?? "";
+          }
+          return JSON.stringify(obj);
+        }).filter((v) => v !== "{}");
+      } else {
+        itemValues = parseIdList(formState.idsRaw).filter((id) => id !== "0");
+      }
+
       const payload = {
         moduleSlug: formState.moduleSlug || undefined,
         endpointSlug: formState.endpointSlug || undefined,
         inputListId: formState.inputListId || undefined,
         label: formState.label || undefined,
-        itemValues: parseIdList(formState.idsRaw).filter((id) => id !== "0"),
+        itemValues,
         targetEnvironment: formState.targetEnvironment,
         method: formState.method || undefined,
         pathTemplate: sub(formState.pathTemplate),
@@ -1307,9 +1377,62 @@ export function App() {
             <div className="tree">
               {modules.map((mod) => {
                 const modOpen = openModules.has(mod.slug);
-                const modGroups = navGroupsByModule.get(mod.slug) ?? [];
-                if (navSearch && modGroups.length === 0) return null;
+                const modTree = navTreeByModule.get(mod.slug);
+                if (navSearch && (!modTree || countTreeEndpoints(modTree) === 0)) return null;
                 const isSelected = formState.moduleSlug === mod.slug;
+
+                function renderFolderNode(node: NavFolderNode, depth: number): React.ReactNode {
+                  const isOpen = openFolders.has(node.key);
+                  const totalCount = countTreeEndpoints(node);
+                  return (
+                    <div className="tree-folder" key={node.key} style={{ "--folder-depth": depth } as React.CSSProperties}>
+                      <button
+                        className="tree-folder-header"
+                        onClick={() => toggleFolder(node.key)}
+                        type="button"
+                      >
+                        <span className={`tree-chevron ${isOpen ? "open" : ""}`}>&#9654;</span>
+                        <span className="tree-folder-icon">&#128194;</span>
+                        <span>{node.name}</span>
+                        <span className="tree-folder-count">{totalCount}</span>
+                      </button>
+                      {isOpen ? (
+                        <>
+                          {node.children.map((child) => renderFolderNode(child, depth + 1))}
+                          {node.endpoints.map((ep) => (
+                            <button
+                              className={`tree-item ${formState.moduleSlug === mod.slug && formState.endpointSlug === ep.slug ? "active" : ""}`}
+                              key={ep.slug}
+                              onClick={() => handleSelectEndpoint(ep, mod)}
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                setContextMenuEndpoint({ slug: ep.slug, x: e.clientX, y: e.clientY });
+                              }}
+                              style={{ "--folder-depth": depth + 1 } as React.CSSProperties}
+                              type="button"
+                            >
+                              <span className={`tree-item-method ${ep.method.toLowerCase()}`}>
+                                {ep.method}
+                              </span>
+                              <span className="tree-item-label">{ep.label}</span>
+                              <span className="tree-item-actions">
+                                <span
+                                  className="tree-item-action"
+                                  title="More actions"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setContextMenuEndpoint({ slug: ep.slug, x: e.clientX, y: e.clientY });
+                                  }}
+                                >&hellip;</span>
+                              </span>
+                            </button>
+                          ))}
+                        </>
+                      ) : null}
+                    </div>
+                  );
+                }
+
                 return (
                   <div className="tree-collection" key={mod.slug}>
                     <button
@@ -1330,62 +1453,14 @@ export function App() {
                       <span className="tree-folder-count">{mod.endpoints.length}</span>
                     </button>
 
-                    {modOpen
-                      ? modGroups.map((group) => {
-                          const folderKey = `${mod.slug}/${group.group}`;
-                          const isOpen = openFolders.has(folderKey);
-                          return (
-                            <div className="tree-folder" key={folderKey}>
-                              <button
-                                className="tree-folder-header"
-                                onClick={() => toggleFolder(folderKey)}
-                                type="button"
-                              >
-                                <span className={`tree-chevron ${isOpen ? "open" : ""}`}>&#9654;</span>
-                                <span className="tree-folder-icon">&#128194;</span>
-                                <span>{group.group}</span>
-                                <span className="tree-folder-count">{group.endpoints.length}</span>
-                              </button>
-                              {isOpen
-                                ? group.endpoints.map((ep) => (
-                                    <button
-                                      className={`tree-item ${formState.moduleSlug === mod.slug && formState.endpointSlug === ep.slug ? "active" : ""}`}
-                                      key={ep.slug}
-                                      onClick={() => handleSelectEndpoint(ep, mod)}
-                                      onContextMenu={(e) => {
-                                        e.preventDefault();
-                                        setContextMenuEndpoint({ slug: ep.slug, x: e.clientX, y: e.clientY });
-                                      }}
-                                      type="button"
-                                    >
-                                      <span
-                                        className={`tree-item-method ${ep.method.toLowerCase()}`}
-                                      >
-                                        {ep.method}
-                                      </span>
-                                      <span className="tree-item-label">{ep.label}</span>
-                                      <span className="tree-item-actions">
-                                        <span
-                                          className="tree-item-action"
-                                          title="More actions"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            setContextMenuEndpoint({ slug: ep.slug, x: e.clientX, y: e.clientY });
-                                          }}
-                                        >&hellip;</span>
-                                      </span>
-                                    </button>
-                                  ))
-                                : null}
-                            </div>
-                          );
-                        })
+                    {modOpen && modTree
+                      ? modTree.children.map((child) => renderFolderNode(child, 1))
                       : null}
                   </div>
                 );
               })}
 
-              {navSearch && [...navGroupsByModule.values()].every((g) => g.length === 0) ? (
+              {navSearch && [...navTreeByModule.values()].every((t) => countTreeEndpoints(t) === 0) ? (
                 <p className="tree-empty">No endpoints match &ldquo;{navSearch}&rdquo;</p>
               ) : null}
             </div>
@@ -1700,17 +1775,53 @@ export function App() {
                   <option key={m} value={m}>{m}</option>
                 ))}
               </select>
-              <input
-                className="url-input"
-                value={previewUrl}
-                readOnly
-                placeholder="Request URL"
-                onClick={() => {
-                  void navigator.clipboard.writeText(previewUrl);
-                  flashCopied("URL copied!");
-                }}
-                title="Click to copy URL"
-              />
+              <div className="url-input-group">
+                {selectedModule?.environments[formState.targetEnvironment]?.baseUrl ? (
+                  <span
+                    className="url-base-prefix"
+                    onClick={() => { void navigator.clipboard.writeText(previewUrl); flashCopied("URL copied!"); }}
+                    title="Click to copy full URL"
+                  >
+                    {selectedModule.environments[formState.targetEnvironment].baseUrl}
+                  </span>
+                ) : null}
+                <input
+                  className="url-path-input"
+                  value={
+                    formState.pathTemplate +
+                    (() => {
+                      const active = formState.queryParams.filter((p) => p.key.trim());
+                      return active.length > 0
+                        ? "?" + active.map((p) => `${p.key}=${p.value}`).join("&")
+                        : "";
+                    })()
+                  }
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    const qIdx = raw.indexOf("?");
+                    const newPath = qIdx === -1 ? raw : raw.slice(0, qIdx);
+                    const qs = qIdx === -1 ? "" : raw.slice(qIdx + 1);
+                    const parsedParams: QueryParamRow[] = qs
+                      ? qs.split("&").map((part) => {
+                          const eqIdx = part.indexOf("=");
+                          return eqIdx === -1
+                            ? { key: part, value: "" }
+                            : { key: part.slice(0, eqIdx), value: part.slice(eqIdx + 1) };
+                        })
+                      : [];
+                    parsedParams.push({ key: "", value: "" });
+                    setFormState((cur) => ({
+                      ...cur,
+                      pathTemplate: newPath,
+                      tokenValues: newPath !== cur.pathTemplate ? {} : cur.tokenValues,
+                      idsRaw: newPath !== cur.pathTemplate ? "" : cur.idsRaw,
+                      queryParams: parsedParams,
+                    }));
+                  }}
+                  placeholder="/path/:token"
+                  spellCheck={false}
+                />
+              </div>
               <div className="url-extras">
                 <label className="url-toggle">
                   <input
@@ -1726,7 +1837,7 @@ export function App() {
               <div className="send-button-group">
                 <button
                   className="send-button-main"
-                  disabled={submitting || (pathParamName !== null && idCount === 0 && !formState.inputListId)}
+                  disabled={submitting || (pathTokens.length > 0 && idCount === 0 && !formState.inputListId)}
                   type="submit"
                 >
                   {submitting ? "Sending..." : "Send"}
@@ -1749,7 +1860,7 @@ export function App() {
                         const form = document.querySelector<HTMLFormElement>(".url-bar");
                         if (form) form.requestSubmit();
                       }}
-                      disabled={submitting || (pathParamName !== null && idCount === 0 && !formState.inputListId)}
+                      disabled={submitting || (pathTokens.length > 0 && idCount === 0 && !formState.inputListId)}
                     >
                       Send (live)
                     </button>
@@ -1761,7 +1872,7 @@ export function App() {
                         const form = document.querySelector<HTMLFormElement>(".url-bar");
                         if (form) form.requestSubmit();
                       }}
-                      disabled={submitting || (pathParamName !== null && idCount === 0 && !formState.inputListId)}
+                      disabled={submitting || (pathTokens.length > 0 && idCount === 0 && !formState.inputListId)}
                     >
                       Send (dry run)
                     </button>
@@ -1926,17 +2037,6 @@ export function App() {
                     </label>
                   </div>
 
-                  <label className="param-field">
-                    <span>Path template</span>
-                    <input
-                      value={formState.pathTemplate}
-                      onChange={(e) =>
-                        setFormState((cur) => ({ ...cur, pathTemplate: e.target.value }))
-                      }
-                      placeholder="/path/:id"
-                    />
-                  </label>
-
                   <div className="query-params-section">
                     <span className="section-label">Query params <span className="section-label-hint">Use <code>{"{{itemValue}}"}</code> in values to inject the current item</span></span>
                     <div className="query-params-table">
@@ -1986,40 +2086,68 @@ export function App() {
                     </div>
                   </div>
 
-                  <div className="ids-section">
-                    <label className="param-field param-field-grow">
-                      <span>{idsLabel}{idCount > 0 ? ` (${idCount})` : ""}</span>
-                      <textarea
-                        rows={4}
-                        value={formState.idsRaw}
-                        onChange={(e) =>
-                          setFormState((cur) => ({
-                            ...cur,
-                            inputListId: "",
-                            idsRaw: e.target.value,
-                          }))
-                        }
-                        placeholder={idsPlaceholder}
-                      />
-                    </label>
-                    {idCount > 0 ? (
-                      <div className="save-ids-row">
-                        <input
-                          value={newInputListLabel}
-                          onChange={(e) => setNewInputListLabel(e.target.value)}
-                          placeholder="List label"
+                  {isMultiToken ? (
+                    <div className="ids-section">
+                      <span className="section-label">Path values{idCount > 0 ? ` (${idCount} rows)` : ""}</span>
+                      {pathTokens.map((token) => {
+                        const vals = formState.tokenValues[token] ?? "";
+                        const count = parseIdList(vals).length;
+                        return (
+                          <label key={token} className="param-field param-field-grow">
+                            <span>{token.replace(/_/gu, " ")}{count > 0 ? ` (${count})` : ""}</span>
+                            <textarea
+                              rows={3}
+                              value={vals}
+                              onChange={(e) =>
+                                setFormState((cur) => ({
+                                  ...cur,
+                                  inputListId: "",
+                                  tokenValues: { ...cur.tokenValues, [token]: e.target.value },
+                                }))
+                              }
+                              placeholder={`101, 204, 330 — one ${token} per request`}
+                            />
+                          </label>
+                        );
+                      })}
+                      <p className="section-hint">Each row position is matched across tokens — request 1 gets row 1 of each, etc.</p>
+                    </div>
+                  ) : (
+                    <div className="ids-section">
+                      <label className="param-field param-field-grow">
+                        <span>{idsLabel}{idCount > 0 ? ` (${idCount})` : ""}</span>
+                        <textarea
+                          rows={4}
+                          value={formState.idsRaw}
+                          onChange={(e) =>
+                            setFormState((cur) => ({
+                              ...cur,
+                              inputListId: "",
+                              idsRaw: e.target.value,
+                            }))
+                          }
+                          placeholder={idsPlaceholder}
                         />
-                        <button
-                          className="ghost-button"
-                          disabled={savingInputList}
-                          onClick={() => void handleSaveCurrentInputList()}
-                          type="button"
-                        >
-                          {savingInputList ? "Saving..." : "Save as list"}
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
+                      </label>
+                      {idCount > 0 ? (
+                        <div className="save-ids-row">
+                          <input
+                            value={newInputListLabel}
+                            onChange={(e) => setNewInputListLabel(e.target.value)}
+                            placeholder="List label"
+                          />
+                          <button
+                            className="ghost-button"
+                            disabled={savingInputList}
+                            onClick={() => void handleSaveCurrentInputList()}
+                            type="button"
+                          >
+                            {savingInputList ? "Saving..." : "Save as list"}
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
 
                 </div>
               ) : workspaceTab === "body" ? (

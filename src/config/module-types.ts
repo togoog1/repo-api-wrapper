@@ -25,6 +25,7 @@ export interface ModuleEndpointDefinition {
   description: string;
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   pathTemplate: string;
+  folder?: string[];
   requestBodyDescription?: string;
   notes?: string;
   defaultRunLabel?: string;
