@@ -26,6 +26,21 @@ export const exampleModule: ModuleDefinition = {
     },
   },
 
+  // Auth — choose a mode: "jwt", "apikey", "bearer", or "none"
+  //
+  // JWT:
+  //   auth: { mode: "jwt", secretEnvVar: "MY_SERVICE_JWT_SECRET",
+  //           jwt: { email: "svc@example.com", expiresInSeconds: 300 } }
+  //
+  // API Key (header):
+  //   auth: { mode: "apikey", apikey: { headerName: "x-api-key", valueEnvVar: "MY_SERVICE_API_KEY" } }
+  //
+  // Static Bearer token:
+  //   auth: { mode: "bearer", bearer: { tokenEnvVar: "MY_SERVICE_BEARER_TOKEN" } }
+  //
+  // No auth:
+  //   auth: { mode: "none" }
+  //
   auth: {
     mode: "jwt",
     secretEnvVar: "MY_SERVICE_JWT_SECRET",

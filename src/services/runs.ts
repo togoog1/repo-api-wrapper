@@ -81,6 +81,7 @@ export async function createHttpRequestRun(
     moduleSlug?: string;
     endpointSlug?: string;
     inputListId?: string;
+    disabledDefaultHeaders?: string[];
   }
 ): Promise<string> {
   const moduleDefinition = getSupportedModule(input.moduleSlug);
@@ -89,9 +90,33 @@ export async function createHttpRequestRun(
     itemValues: input.itemValues,
     inputListId: input.inputListId
   });
+
+  // Merge default headers: module → endpoint → user (highest priority)
+  const moduleDefaultHeaders = moduleDefinition.defaultHeaders ?? {};
+  const epDefaultHeaders = endpointDefinition.defaultHeaders ?? {};
+  const epConfigHeaders = (
+    endpointDefinition.defaultRunConfig?.headers &&
+    typeof endpointDefinition.defaultRunConfig.headers === "object" &&
+    !Array.isArray(endpointDefinition.defaultRunConfig.headers)
+  ) ? endpointDefinition.defaultRunConfig.headers as Record<string, string> : {};
+  const userHeaders = input.headers ?? {};
+  const disabledKeys = new Set(input.disabledDefaultHeaders ?? []);
+
+  const mergedHeaders: Record<string, string> = {};
+  for (const [k, v] of Object.entries(moduleDefaultHeaders)) {
+    if (!disabledKeys.has(k)) mergedHeaders[k] = v;
+  }
+  for (const [k, v] of Object.entries({ ...epDefaultHeaders, ...epConfigHeaders })) {
+    if (!disabledKeys.has(k)) mergedHeaders[k] = v;
+  }
+  for (const [k, v] of Object.entries(userHeaders)) {
+    mergedHeaders[k] = v;
+  }
+
   const parsed = httpRequestInputSchema.parse({
     ...endpointDefinition.defaultRunConfig,
     ...input,
+    headers: Object.keys(mergedHeaders).length > 0 ? mergedHeaders : undefined,
     itemValues: resolvedInput.itemValues,
     endpointSlug: input.endpointSlug ?? endpointDefinition.slug,
     targetEnvironment: input.targetEnvironment ?? moduleDefinition.defaultTargetEnvironment,
@@ -218,7 +243,8 @@ export async function createRetryRunFromFailures(runId: string): Promise<string>
         : undefined,
     stopOnHttpStatuses: Array.isArray(config.stopOnHttpStatuses)
       ? config.stopOnHttpStatuses.filter((value): value is number => typeof value === "number")
-      : []
+      : [],
+    skipAuth: typeof config.skipAuth === "boolean" ? config.skipAuth : false,
   });
 }
 

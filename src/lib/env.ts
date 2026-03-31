@@ -8,7 +8,7 @@ import {
   type TargetEnvironment
 } from "./target-environment.js";
 
-type AuthMode = "jwt";
+type AuthMode = "jwt" | "apikey" | "bearer" | "none";
 type CachedToken = {
   value: string;
   expiresAt: number;
@@ -44,21 +44,8 @@ function getFirstDefinedEnv(...names: string[]): string | undefined {
   return undefined;
 }
 
-function getAuthMode(): AuthMode {
-  const moduleDefinition = getSupportedModule();
-  const secretNames = [moduleDefinition.auth.secretEnvVar];
-
-  if (moduleDefinition.auth.legacySecretEnvVar) {
-    secretNames.push(moduleDefinition.auth.legacySecretEnvVar);
-  }
-
-  if (getFirstDefinedEnv(...secretNames)) {
-    return "jwt";
-  }
-
-  throw new Error(
-    `Missing auth configuration. Set ${moduleDefinition.auth.secretEnvVar} to enable JWT auth.`
-  );
+function getAuthMode(moduleSlug?: string): AuthMode {
+  return getSupportedModule(moduleSlug).auth.mode;
 }
 
 function resolveApiBaseUrl(
@@ -82,14 +69,19 @@ async function generateJwtToken(
   if (envSpecificVar) {
     secretNames.push(envSpecificVar);
   }
-  secretNames.push(moduleDefinition.auth.secretEnvVar);
+  if (moduleDefinition.auth.secretEnvVar) {
+    secretNames.push(moduleDefinition.auth.secretEnvVar);
+  }
   if (moduleDefinition.auth.legacySecretEnvVar) {
     secretNames.push(moduleDefinition.auth.legacySecretEnvVar);
   }
 
   const secret =
-    getFirstDefinedEnv(...secretNames) ?? requiredEnv(moduleDefinition.auth.secretEnvVar);
+    getFirstDefinedEnv(...secretNames) ?? requiredEnv(moduleDefinition.auth.secretEnvVar ?? "JWT_SECRET");
   const jwtConfig = moduleDefinition.auth.jwt;
+  if (!jwtConfig) {
+    throw new Error(`Module ${moduleDefinition.slug} is configured for JWT auth but is missing jwt settings.`);
+  }
   const subject = jwtConfig.subject ?? jwtConfig.email;
 
   let token = new SignJWT({
@@ -124,7 +116,7 @@ async function getCachedJwtToken(
     : moduleDefinition.slug;
   const cachedJwtToken = cachedJwtTokens.get(cacheKey);
   const expiresAt =
-    Date.now() + moduleDefinition.auth.jwt.expiresInSeconds * 1_000;
+    Date.now() + (moduleDefinition.auth.jwt?.expiresInSeconds ?? 300) * 1_000;
 
   if (
     cachedJwtToken &&
@@ -146,6 +138,7 @@ export interface EnvConfig {
   authMode: AuthMode;
   defaultTargetEnvironment: TargetEnvironment;
   jwtEmail?: string;
+  getAuthHeaders(targetEnvironment?: TargetEnvironment): Promise<Record<string, string>>;
   getApiBearerToken(targetEnvironment?: TargetEnvironment): Promise<string>;
   resolveApiBaseUrl(targetEnvironment: TargetEnvironment): string;
 }
@@ -155,9 +148,32 @@ export function getEnv(moduleSlug?: string): EnvConfig {
 
   return {
     apiTimeoutMs: appConfig.requests.timeoutMs,
-    authMode: getAuthMode(),
+    authMode: getAuthMode(moduleSlug),
     defaultTargetEnvironment: moduleDefinition.defaultTargetEnvironment,
-    jwtEmail: moduleDefinition.auth.jwt.email,
+    jwtEmail: moduleDefinition.auth.jwt?.email,
+    async getAuthHeaders(targetEnvironment?) {
+      switch (moduleDefinition.auth.mode) {
+        case "jwt": {
+          const token = await getCachedJwtToken(moduleDefinition.slug, targetEnvironment);
+          return { authorization: `Bearer ${token}` };
+        }
+        case "apikey": {
+          const apikey = moduleDefinition.auth.apikey;
+          if (!apikey) return {};
+          const value = optionalEnv(apikey.valueEnvVar);
+          return value ? { [apikey.headerName]: value } : {};
+        }
+        case "bearer": {
+          const bearer = moduleDefinition.auth.bearer;
+          if (!bearer) return {};
+          const token = optionalEnv(bearer.tokenEnvVar);
+          return token ? { authorization: `Bearer ${token}` } : {};
+        }
+        case "none":
+        default:
+          return {};
+      }
+    },
     async getApiBearerToken(targetEnvironment?) {
       return getCachedJwtToken(moduleDefinition.slug, targetEnvironment);
     },
@@ -168,6 +184,23 @@ export function getEnv(moduleSlug?: string): EnvConfig {
       );
     }
   };
+}
+
+function isAuthConfigured(mod: import("../config/module-types.js").ModuleDefinition): boolean {
+  switch (mod.auth.mode) {
+    case "jwt": {
+      const names = [mod.auth.secretEnvVar, mod.auth.legacySecretEnvVar].filter(Boolean) as string[];
+      return names.length > 0 && Boolean(getFirstDefinedEnv(...names));
+    }
+    case "apikey":
+      return Boolean(mod.auth.apikey?.valueEnvVar && optionalEnv(mod.auth.apikey.valueEnvVar));
+    case "bearer":
+      return Boolean(mod.auth.bearer?.tokenEnvVar && optionalEnv(mod.auth.bearer.tokenEnvVar));
+    case "none":
+      return true;
+    default:
+      return false;
+  }
 }
 
 export interface PublicRuntimeConfig {
@@ -183,17 +216,12 @@ export interface PublicRuntimeConfig {
 
 export function getPublicRuntimeConfig(): PublicRuntimeConfig {
   const defaultModule = getSupportedModule();
-  const secretNames = [defaultModule.auth.secretEnvVar];
-
-  if (defaultModule.auth.legacySecretEnvVar) {
-    secretNames.push(defaultModule.auth.legacySecretEnvVar);
-  }
 
   return {
     defaultTargetEnvironment: defaultModule.defaultTargetEnvironment,
     availableTargetEnvironments: [...targetEnvironmentSchema.options],
-    authMode: getFirstDefinedEnv(...secretNames) ? "jwt" : "unconfigured",
-    jwtEmail: defaultModule.auth.jwt.email,
+    authMode: isAuthConfigured(defaultModule) ? defaultModule.auth.mode : "unconfigured",
+    jwtEmail: defaultModule.auth.jwt?.email ?? null,
     serviceName: defaultModule.serviceName,
     tokenCacheStrategy: "memory",
     targetBaseUrls: {

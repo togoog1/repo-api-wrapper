@@ -33,7 +33,8 @@ export const httpRequestConfigSchema = z.object({
   retryDelayMs: z.number().int().min(0).default(1_000),
   stopAfterFailures: z.number().int().positive().optional(),
   stopAfterConsecutiveFailures: z.number().int().positive().optional(),
-  stopOnHttpStatuses: z.array(z.number().int().min(100).max(599)).default([])
+  stopOnHttpStatuses: z.array(z.number().int().min(100).max(599)).default([]),
+  skipAuth: z.boolean().default(false)
 });
 
 export type HttpRequestRunConfig = z.infer<typeof httpRequestConfigSchema>;
@@ -63,7 +64,7 @@ export const httpRequestAction: ActionDefinition<HttpRequestRunConfig> = {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), env.apiTimeoutMs);
     const apiBaseUrl = env.resolveApiBaseUrl(config.targetEnvironment);
-    const apiBearerToken = await env.getApiBearerToken(config.targetEnvironment);
+    const authHeaders = config.skipAuth ? {} : await env.getAuthHeaders(config.targetEnvironment);
     const method = config.method;
     const endpoint = buildRequestUrl(apiBaseUrl, config.pathTemplate, itemValue, config.queryParams);
 
@@ -119,7 +120,7 @@ export const httpRequestAction: ActionDefinition<HttpRequestRunConfig> = {
       const response = await fetch(endpoint, {
         method,
         headers: {
-          authorization: `Bearer ${apiBearerToken}`,
+          ...authHeaders,
           ...(bodyContentType ? { "content-type": bodyContentType } : {}),
           ...customHeaders
         },

@@ -104,6 +104,8 @@ interface CreateRunFormState {
   stopAfterFailures: string;
   stopAfterConsecutiveFailures: string;
   stopOnHttpStatuses: string;
+  skipAuth: boolean;
+  disabledDefaultHeaders: string[];
 }
 
 interface ModuleEndpointCatalog {
@@ -114,6 +116,7 @@ interface ModuleEndpointCatalog {
   method: string;
   pathTemplate: string;
   folder?: string[];
+  defaultHeaders?: Record<string, string>;
   requestBodyDescription?: string;
   notes?: string;
   defaultRunLabel?: string;
@@ -128,9 +131,16 @@ interface ModuleCatalog {
   defaultTargetEnvironment: TargetEnvironment;
   environments: Record<TargetEnvironment, { baseUrl: string }>;
   auth: {
-    mode: "jwt";
-    jwt: {
+    mode: "jwt" | "apikey" | "bearer" | "none";
+    jwt?: {
       email: string;
+    };
+    apikey?: {
+      headerName: string;
+      valueEnvVar: string;
+    };
+    bearer?: {
+      tokenEnvVar: string;
     };
   };
   defaultHeaders?: Record<string, string>;
@@ -140,7 +150,7 @@ interface ModuleCatalog {
 interface RuntimeConfig {
   defaultTargetEnvironment: TargetEnvironment;
   availableTargetEnvironments: TargetEnvironment[];
-  authMode: "jwt" | "unconfigured";
+  authMode: "jwt" | "apikey" | "bearer" | "none" | "unconfigured";
   jwtEmail: string | null;
   serviceName: string;
   tokenCacheStrategy: "memory";
@@ -186,6 +196,8 @@ const defaultFormState: CreateRunFormState = {
   stopAfterFailures: "",
   stopAfterConsecutiveFailures: "",
   stopOnHttpStatuses: "401,403",
+  skipAuth: false,
+  disabledDefaultHeaders: [],
 };
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
@@ -504,6 +516,8 @@ function applyCatalogDefaults(input: {
         ? String(cfg.stopAfterConsecutiveFailures)
         : "",
     stopOnHttpStatuses: stopHttp,
+    skipAuth: false,
+    disabledDefaultHeaders: [],
   };
 }
 
@@ -909,10 +923,9 @@ export function App() {
           : undefined;
 
       const hEntries = formState.headers.filter((p) => p.key.trim());
-      const moduleDefaultHeaders = selectedModule?.defaultHeaders ?? {};
-      const perRequestHeaders = Object.fromEntries(hEntries.map((p) => [p.key.trim(), sub(p.value)]));
-      const mergedHeaders = { ...moduleDefaultHeaders, ...perRequestHeaders };
-      const headers = Object.keys(mergedHeaders).length > 0 ? mergedHeaders : undefined;
+      const headers = hEntries.length > 0
+        ? Object.fromEntries(hEntries.map((p) => [p.key.trim(), sub(p.value)]))
+        : undefined;
 
       // Build itemValues from single token (idsRaw) or multi-token (tokenValues, zipped)
       const pathTokens = extractAllPathTokens(formState.pathTemplate);
@@ -963,6 +976,10 @@ export function App() {
         stopOnHttpStatuses: formState.stopOnHttpStatuses
           .split(/[\s,]+/u).map((v) => v.trim()).filter(Boolean)
           .map((v) => Number.parseInt(v, 10)).filter((v) => !Number.isNaN(v)),
+        skipAuth: formState.skipAuth,
+        disabledDefaultHeaders: formState.disabledDefaultHeaders.length > 0
+          ? formState.disabledDefaultHeaders
+          : undefined,
       };
       const res = await requestJson<{ runId: string }>("/api/runs/http-request", {
         method: "POST",
@@ -1911,7 +1928,19 @@ export function App() {
                 onClick={() => setWorkspaceTab("headers")}
                 type="button"
               >
-                Headers{formState.headers.filter((h) => h.key.trim()).length > 0 ? ` (${formState.headers.filter((h) => h.key.trim()).length})` : ""}
+                Headers{(() => {
+                  const userCount = formState.headers.filter((h) => h.key.trim()).length;
+                  let inheritedCount = 0;
+                  if (selectedModule?.auth?.mode && selectedModule.auth.mode !== "none") inheritedCount++;
+                  inheritedCount += Object.keys(selectedModule?.defaultHeaders ?? {}).length;
+                  const epH = selectedEndpoint?.defaultHeaders ?? (
+                    selectedEndpoint?.defaultRunConfig?.headers && typeof selectedEndpoint.defaultRunConfig.headers === "object" && !Array.isArray(selectedEndpoint.defaultRunConfig.headers)
+                      ? selectedEndpoint.defaultRunConfig.headers as Record<string, string> : null
+                  );
+                  inheritedCount += Object.keys(epH ?? {}).length;
+                  const total = userCount + inheritedCount;
+                  return total > 0 ? ` (${total})` : "";
+                })()}
               </button>
               <button
                 className={workspaceTab === "pacing" ? "active" : ""}
@@ -1933,6 +1962,85 @@ export function App() {
 
               {workspaceTab === "headers" ? (
                 <div className="params-content">
+                  {/* ── Inherited & auth headers ─────────────────────────── */}
+                  {(() => {
+                    const inherited: Array<{ key: string; displayValue: string; source: string; isAuth: boolean }> = [];
+
+                    if (selectedModule?.auth) {
+                      const auth = selectedModule.auth;
+                      if (auth.mode === "jwt") {
+                        inherited.push({ key: "authorization", displayValue: "Bearer ••••••••", source: "Auth (JWT)", isAuth: true });
+                      } else if (auth.mode === "apikey" && auth.apikey) {
+                        inherited.push({ key: auth.apikey.headerName, displayValue: `••••••••  (${auth.apikey.valueEnvVar})`, source: "Auth (API Key)", isAuth: true });
+                      } else if (auth.mode === "bearer") {
+                        inherited.push({ key: "authorization", displayValue: "Bearer ••••••••", source: "Auth (Bearer)", isAuth: true });
+                      }
+                    }
+
+                    if (selectedModule?.defaultHeaders) {
+                      for (const [key, value] of Object.entries(selectedModule.defaultHeaders)) {
+                        if (!inherited.some((h) => h.key.toLowerCase() === key.toLowerCase())) {
+                          inherited.push({ key, displayValue: value, source: selectedModule.label, isAuth: false });
+                        }
+                      }
+                    }
+
+                    const epCfgHeaders =
+                      selectedEndpoint?.defaultRunConfig?.headers &&
+                      typeof selectedEndpoint.defaultRunConfig.headers === "object" &&
+                      !Array.isArray(selectedEndpoint.defaultRunConfig.headers)
+                        ? (selectedEndpoint.defaultRunConfig.headers as Record<string, string>)
+                        : null;
+                    const epDefHeaders = selectedEndpoint?.defaultHeaders ?? epCfgHeaders;
+                    if (epDefHeaders) {
+                      for (const [key, value] of Object.entries(epDefHeaders)) {
+                        if (!inherited.some((h) => h.key.toLowerCase() === key.toLowerCase())) {
+                          inherited.push({ key, displayValue: value, source: selectedEndpoint.label, isAuth: false });
+                        }
+                      }
+                    }
+
+                    if (inherited.length === 0) return null;
+
+                    return (
+                      <div className="query-params-section">
+                        <span className="section-label">Inherited headers <span className="section-label-hint">Auto-included — uncheck to disable</span></span>
+                        <div className="query-params-table">
+                          {inherited.map((h) => {
+                            const isDisabled = h.isAuth
+                              ? formState.skipAuth
+                              : formState.disabledDefaultHeaders.includes(h.key);
+                            return (
+                              <div key={`${h.isAuth ? "auth:" : ""}${h.key}`} className={`query-param-row collection-header-row${isDisabled ? " inherited-disabled" : ""}`}>
+                                <label className="header-toggle-wrap">
+                                  <input
+                                    type="checkbox"
+                                    checked={!isDisabled}
+                                    onChange={() => {
+                                      if (h.isAuth) {
+                                        setFormState((cur) => ({ ...cur, skipAuth: !cur.skipAuth }));
+                                      } else {
+                                        setFormState((cur) => ({
+                                          ...cur,
+                                          disabledDefaultHeaders: isDisabled
+                                            ? cur.disabledDefaultHeaders.filter((k) => k !== h.key)
+                                            : [...cur.disabledDefaultHeaders, h.key],
+                                        }));
+                                      }
+                                    }}
+                                  />
+                                </label>
+                                <input className="query-param-key" value={h.key} readOnly tabIndex={-1} />
+                                <input className="query-param-value" value={h.displayValue} readOnly tabIndex={-1} />
+                                <span className="inherited-source">{h.source}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   <div className="query-params-section">
                     <span className="section-label">Request headers <span className="section-label-hint">Use <code>{"{{itemValue}}"}</code> to inject the current item</span></span>
                     <div className="query-params-table">
@@ -1979,23 +2087,8 @@ export function App() {
                         </div>
                       ))}
                     </div>
-                    <p className="section-hint">Authorization and Content-Type are set automatically. Per-request headers override collection headers.</p>
+                    <p className="section-hint">Per-request headers override inherited headers. Content-Type is set automatically.</p>
                   </div>
-
-                  {selectedModule?.defaultHeaders && Object.keys(selectedModule.defaultHeaders).length > 0 ? (
-                    <div className="query-params-section">
-                      <span className="section-label">Collection headers <span className="section-label-hint">Inherited from {selectedModule.label} — override above</span></span>
-                      <div className="query-params-table">
-                        {Object.entries(selectedModule.defaultHeaders).map(([key, value]) => (
-                          <div key={key} className="query-param-row collection-header-row">
-                            <input className="query-param-key" value={key} readOnly tabIndex={-1} />
-                            <input className="query-param-value" value={value} readOnly tabIndex={-1} />
-                            <span className="remove-param-btn" />
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
                 </div>
               ) : workspaceTab === "params" ? (
                 <div className="params-content">

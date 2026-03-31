@@ -62,7 +62,9 @@ const createRunRequestSchema = z
     retryDelayMs: z.number().int().min(0).default(1_000),
     stopAfterFailures: z.number().int().positive().optional(),
     stopAfterConsecutiveFailures: z.number().int().positive().optional(),
-    stopOnHttpStatuses: z.array(z.number().int().min(100).max(599)).default([])
+    stopOnHttpStatuses: z.array(z.number().int().min(100).max(599)).default([]),
+    skipAuth: z.boolean().default(false),
+    disabledDefaultHeaders: z.array(z.string()).default([])
   })
   ;
 

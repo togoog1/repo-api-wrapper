@@ -1565,11 +1565,44 @@ td {
 }
 
 /* Collection (inherited) header rows */
-.collection-header-row input {
+.collection-header-row {
+  grid-template-columns: auto 1fr 1fr auto;
+}
+
+.collection-header-row input[type="text"],
+.collection-header-row input:not([type]) {
   opacity: 0.5;
   cursor: default;
   background: transparent !important;
   border-style: dashed !important;
+}
+
+.collection-header-row.inherited-disabled {
+  opacity: 0.35;
+}
+
+.header-toggle-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  flex-shrink: 0;
+}
+
+.header-toggle-wrap input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.inherited-source {
+  font-size: 0.7rem;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  padding: 0 4px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ── Collapsible sections (events, config, history) ──────────────── */
