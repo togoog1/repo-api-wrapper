@@ -606,7 +606,7 @@ input:focus, select:focus, textarea:focus {
 /* URL bar */
 .url-bar {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 0;
   padding: 8px 12px;
   background: var(--bg);
@@ -614,26 +614,22 @@ input:focus, select:focus, textarea:focus {
 }
 
 .url-method-select {
-  padding: 8px 12px;
+  padding: 0 12px;
   border: 1px solid var(--line-strong);
-  border-right: 1px solid var(--line);
+  border-right: none;
   border-radius: var(--radius) 0 0 var(--radius);
   background: var(--bg-raised);
   font-size: 0.82rem;
   font-weight: 700;
-  min-width: 80px;
-  text-align: center;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
+  min-width: 88px;
   flex-shrink: 0;
-}
-
-.url-method-select::after {
-  content: "▾";
-  font-size: 10px;
-  color: var(--ink-dim);
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  padding-right: 22px;
 }
 
 .url-method-select.get { color: var(--method-get); }
@@ -644,7 +640,7 @@ input:focus, select:focus, textarea:focus {
 
 .url-input {
   flex: 1;
-  padding: 8px 12px;
+  padding: 0 12px;
   border: 1px solid var(--line-strong);
   border-left: none;
   border-right: none;
@@ -850,7 +846,159 @@ input:focus, select:focus, textarea:focus {
   flex: 1;
 }
 
-.master-ids-section {
+
+.query-params-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.section-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.query-params-table {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.query-param-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 24px;
+  gap: 4px;
+  align-items: center;
+}
+
+.query-param-key,
+.query-param-value {
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg-input);
+  color: var(--ink);
+  font-size: 0.82rem;
+  width: 100%;
+}
+
+.remove-param-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--ink-dim);
+  font-size: 1rem;
+  cursor: pointer;
+  border-radius: 3px;
+  line-height: 1;
+}
+
+.remove-param-btn:hover {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.section-label-hint {
+  margin-left: 8px;
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--ink-dim);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.section-label-hint code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  background: var(--bg-input);
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+.section-hint {
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+  margin: 2px 0 0;
+}
+
+.section-hint code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  background: var(--bg-input);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+}
+
+/* Body type selector */
+.body-type-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.body-type-buttons {
+  display: flex;
+  gap: 3px;
+}
+
+.body-type-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 100ms, color 100ms, border-color 100ms;
+}
+
+.body-type-btn:hover {
+  background: var(--bg-raised);
+  color: var(--ink);
+}
+
+.body-type-btn.active {
+  background: rgba(255, 108, 55, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.body-none-hint {
+  padding: 4px;
+}
+
+/* Environment variables panel */
+.env-vars-hint {
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+
+.env-vars-hint code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  background: var(--bg-input);
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: var(--accent);
+  font-size: 0.72rem;
+}
+
+/* Dim table cell (for duration etc) */
+.dim-cell {
+  color: var(--ink-dim);
+  font-size: 0.8rem;
+}
+
+.ids-section {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1303,13 +1451,76 @@ td {
   padding: 8px;
   border-radius: 4px;
   background: var(--bg-input);
-  max-height: 140px;
+  max-height: 200px;
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 0.78rem;
   font-family: "SF Mono", "Fira Code", "Consolas", monospace;
   color: var(--ink);
+}
+
+.inspector-block-error .inspector-block-header > span {
+  color: var(--danger);
+}
+
+/* Inspector meta badges */
+.inspector-duration,
+.inspector-size,
+.inspector-attempts {
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+}
+
+/* JSON syntax highlighting */
+.json-key   { color: #9cdcfe; }
+.json-str   { color: #ce9178; }
+.json-num   { color: #b5cea8; }
+.json-bool  { color: #569cd6; }
+.json-null  { color: #808080; }
+
+/* Response headers list */
+.resp-headers-list {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--bg-input);
+  border-radius: 4px;
+  display: grid;
+  gap: 3px;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.resp-header-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 40%) 1fr;
+  gap: 8px;
+  font-size: 0.76rem;
+  font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+}
+
+.resp-header-row dt {
+  color: #9cdcfe;
+  font-weight: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resp-header-row dd {
+  color: var(--ink-soft);
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Collection (inherited) header rows */
+.collection-header-row input {
+  opacity: 0.5;
+  cursor: default;
+  background: transparent !important;
+  border-style: dashed !important;
 }
 
 /* ── Collapsible sections (events, config, history) ──────────────── */

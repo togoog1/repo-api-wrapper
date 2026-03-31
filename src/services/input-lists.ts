@@ -106,7 +106,7 @@ export async function createSavedInputListFromRunFailures(runId: string) {
         sequence: "asc"
       },
       select: {
-        masterId: true
+        itemValue: true
       }
     })
   ]);
@@ -123,8 +123,8 @@ export async function createSavedInputListFromRunFailures(runId: string) {
     label: `${run.label ?? run.id} failures`,
     description: "Saved from failed run items",
     moduleSlug: run.moduleSlug ?? undefined,
-    itemType: "master_id",
-    data: failedItems.map((item) => item.masterId),
+    itemType: "item_value",
+    data: failedItems.map((item) => item.itemValue).filter((id) => id !== "0"),
     sourceRunId: run.id
   });
 }

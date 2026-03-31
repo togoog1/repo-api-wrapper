@@ -2,9 +2,9 @@ import { RunItemStatus, RunStatus } from "../generated/prisma/client.js";
 
 import { getModuleEndpoint, getSupportedModule } from "../config/services.js";
 import {
-  syncOnboardingInputSchema,
-  type SyncOnboardingInput
-} from "../actions/parse-sync-onboarding-input.js";
+  httpRequestInputSchema,
+  type HttpRequestInput
+} from "../actions/parse-http-request-input.js";
 import { createRunSlug } from "../lib/slug.js";
 import { prisma } from "../lib/prisma.js";
 import { startRunInBackground } from "../runner/background-runs.js";
@@ -28,22 +28,23 @@ function createRunLabel(action: string, input?: string): string {
   return `${action} ${timestamp}`;
 }
 
-async function resolveMasterIds(input: {
-  masterIds?: number[];
+async function resolveItemValues(input: {
+  itemValues?: string[];
   inputListId?: string;
 }): Promise<{
-  masterIds: number[];
+  itemValues: string[];
   inputListId?: string;
 }> {
-  if (input.masterIds && input.masterIds.length > 0) {
+  if (input.itemValues && input.itemValues.length > 0) {
     return {
-      masterIds: input.masterIds,
+      itemValues: input.itemValues,
       inputListId: input.inputListId
     };
   }
 
   if (!input.inputListId) {
-    throw new Error("Provide master IDs directly or select a saved input list.");
+    // No IDs and no list — endpoint has no path token, run once
+    return { itemValues: ["0"] };
   }
 
   const inputList = await prisma.savedInputList.findUnique({
@@ -59,30 +60,24 @@ async function resolveMasterIds(input: {
   }
 
   const rawValues = Array.isArray(inputList.data) ? inputList.data : [];
-  const masterIds = rawValues.map((value) => {
-    if (typeof value === "number" && Number.isInteger(value) && value > 0) {
-      return value;
+  const itemValues = rawValues.map((value) => {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
     }
-
-    if (typeof value === "string") {
-      const parsed = Number.parseInt(value, 10);
-
-      if (!Number.isNaN(parsed) && parsed > 0) {
-        return parsed;
-      }
+    if (typeof value === "number") {
+      return String(value);
     }
-
-    throw new Error("Selected input list contains non-master-id values.");
+    throw new Error("Selected input list contains invalid values.");
   });
 
   return {
-    masterIds,
+    itemValues,
     inputListId: inputList.id
   };
 }
 
-export async function createSyncOnboardingRun(
-  input: SyncOnboardingInput & {
+export async function createHttpRequestRun(
+  input: HttpRequestInput & {
     moduleSlug?: string;
     endpointSlug?: string;
     inputListId?: string;
@@ -90,14 +85,14 @@ export async function createSyncOnboardingRun(
 ): Promise<string> {
   const moduleDefinition = getSupportedModule(input.moduleSlug);
   const endpointDefinition = getModuleEndpoint(moduleDefinition, input.endpointSlug);
-  const resolvedInput = await resolveMasterIds({
-    masterIds: input.masterIds,
+  const resolvedInput = await resolveItemValues({
+    itemValues: input.itemValues,
     inputListId: input.inputListId
   });
-  const parsed = syncOnboardingInputSchema.parse({
+  const parsed = httpRequestInputSchema.parse({
     ...endpointDefinition.defaultRunConfig,
     ...input,
-    masterIds: resolvedInput.masterIds,
+    itemValues: resolvedInput.itemValues,
     endpointSlug: input.endpointSlug ?? endpointDefinition.slug,
     targetEnvironment: input.targetEnvironment ?? moduleDefinition.defaultTargetEnvironment,
     pathTemplate: input.pathTemplate ?? endpointDefinition.pathTemplate
@@ -118,15 +113,15 @@ export async function createSyncOnboardingRun(
         moduleSlug: moduleDefinition.slug,
         inputListId: resolvedInput.inputListId,
         config: config as never,
-        totalItems: config.masterIds.length
+        totalItems: config.itemValues.length
       }
     });
 
     await tx.runItem.createMany({
-      data: config.masterIds.map((masterId, index) => ({
+      data: config.itemValues.map((itemValue, index) => ({
         runId: createdRun.id,
         sequence: index + 1,
-        masterId
+        itemValue
       }))
     });
 
@@ -139,7 +134,7 @@ export async function createSyncOnboardingRun(
         eventType: "run.created",
         message: `Created run ${createdRun.label ?? createdRun.id}`,
         data: {
-          itemCount: config.masterIds.length,
+          itemCount: config.itemValues.length,
           serviceName: createdRun.serviceName,
           moduleSlug: createdRun.moduleSlug
         } as never
@@ -152,14 +147,14 @@ export async function createSyncOnboardingRun(
   return run.id;
 }
 
-export async function createAndStartSyncOnboardingRun(
-  input: SyncOnboardingInput & {
+export async function createAndStartHttpRequestRun(
+  input: HttpRequestInput & {
     moduleSlug?: string;
     endpointSlug?: string;
     inputListId?: string;
   }
 ): Promise<string> {
-  const runId = await createSyncOnboardingRun(input);
+  const runId = await createHttpRequestRun(input);
   startRunInBackground(runId);
   return runId;
 }
@@ -184,7 +179,7 @@ export async function createRetryRunFromFailures(runId: string): Promise<string>
         sequence: "asc"
       },
       select: {
-        masterId: true
+        itemValue: true
       }
     })
   ]);
@@ -199,12 +194,14 @@ export async function createRetryRunFromFailures(runId: string): Promise<string>
 
   const config = asObject(run.config);
 
-  return createAndStartSyncOnboardingRun({
+  return createAndStartHttpRequestRun({
     moduleSlug: run.moduleSlug ?? undefined,
     endpointSlug: typeof config.endpointSlug === "string" ? config.endpointSlug : undefined,
     label: `${run.label ?? "run"} failures`,
-    masterIds: failedItems.map((item) => item.masterId),
-    targetEnvironment: config.targetEnvironment as SyncOnboardingInput["targetEnvironment"],
+    itemValues: failedItems.map((item) => item.itemValue).filter((id) => id !== "0"),
+    targetEnvironment: config.targetEnvironment as HttpRequestInput["targetEnvironment"],
+    method: (typeof config.method === "string" ? config.method : "POST") as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+    bodyType: (typeof config.bodyType === "string" ? config.bodyType : "json") as "none" | "json" | "form" | "text" | "multipart",
     pathTemplate: typeof config.pathTemplate === "string" ? config.pathTemplate : undefined,
     dryRun: typeof config.dryRun === "boolean" ? config.dryRun : false,
     concurrency: typeof config.concurrency === "number" ? config.concurrency : 1,
@@ -341,7 +338,7 @@ export async function getRunOverview(runId: string) {
       select: {
         id: true,
         sequence: true,
-        masterId: true,
+        itemValue: true,
         attemptCount: true,
         lastHttpStatus: true,
         lastError: true,
@@ -393,7 +390,7 @@ export async function listRunItems(input: {
     select: {
       id: true,
       sequence: true,
-      masterId: true,
+      itemValue: true,
       status: true,
       attemptCount: true,
       lastHttpStatus: true,

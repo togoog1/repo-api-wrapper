@@ -57,6 +57,7 @@ interface ConvertedEndpoint {
   description: string;
   method: string;
   pathTemplate: string;
+  queryParams?: Record<string, string>;
   requestBodyDescription?: string;
   notes?: string;
 }
@@ -92,11 +93,14 @@ function extractPath(url: PostmanUrl | string | undefined): string {
   return "/";
 }
 
-function extractQueryNotes(url: PostmanUrl | string | undefined): string | undefined {
+function extractQueryParams(url: PostmanUrl | string | undefined): Record<string, string> | undefined {
   if (!url || typeof url === "string") return undefined;
   if (!url.query || url.query.length === 0) return undefined;
-  const params = url.query.map((q) => q.key).join(", ");
-  return `Query params: ${params}`;
+  const result: Record<string, string> = {};
+  for (const { key, value } of url.query) {
+    if (key) result[key] = value ?? "";
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function extractBodyDescription(body: PostmanBody | undefined): string | undefined {
@@ -168,7 +172,7 @@ function convertCollection(collection: PostmanCollection): {
     }
     seenSlugs.add(slug);
 
-    const queryNotes = extractQueryNotes(req.url);
+    const queryParams = extractQueryParams(req.url);
     const bodyDesc = extractBodyDescription(req.body);
     const descParts: string[] = [];
     if (folder) descParts.push(`Folder: ${folder}`);
@@ -182,8 +186,8 @@ function convertCollection(collection: PostmanCollection): {
       description: descParts.join(". ") || `${method} ${pathTemplate}`,
       method,
       pathTemplate,
+      queryParams,
       requestBodyDescription: bodyDesc,
-      notes: queryNotes,
     });
   }
 
@@ -236,7 +240,7 @@ function generateModuleFile(opts: {
   for (const ep of opts.endpoints) {
     lines.push(`    {`);
     lines.push(`      slug: ${JSON.stringify(ep.slug)},`);
-    lines.push(`      action: "sync-onboarding",`);
+    lines.push(`      action: "http-request",`);
     lines.push(`      label: ${JSON.stringify(ep.label)},`);
     lines.push(`      description: ${JSON.stringify(ep.description)},`);
     lines.push(`      method: ${JSON.stringify(ep.method)},`);
@@ -244,8 +248,14 @@ function generateModuleFile(opts: {
     if (ep.requestBodyDescription) {
       lines.push(`      requestBodyDescription: ${JSON.stringify(ep.requestBodyDescription)},`);
     }
-    if (ep.notes) {
-      lines.push(`      notes: ${JSON.stringify(ep.notes)},`);
+    const hasDefaults = ep.queryParams || ep.method !== "POST";
+    if (hasDefaults) {
+      lines.push(`      defaultRunConfig: {`);
+      lines.push(`        method: ${JSON.stringify(ep.method)},`);
+      if (ep.queryParams) {
+        lines.push(`        queryParams: ${JSON.stringify(ep.queryParams)},`);
+      }
+      lines.push(`      },`);
     }
     lines.push(`    },`);
   }

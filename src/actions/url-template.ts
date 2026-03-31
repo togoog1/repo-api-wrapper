@@ -1,8 +1,4 @@
-const MASTER_ID_TOKEN_PATTERNS = [":master_id", "{master_id}"] as const;
-
-export function hasMasterIdToken(pathTemplate: string): boolean {
-  return MASTER_ID_TOKEN_PATTERNS.some((token) => pathTemplate.includes(token));
-}
+const PATH_TOKEN_REGEX = /:[a-z][a-z0-9_]*|\{[a-z][a-z0-9_]*\}/giu;
 
 export function normalizePathTemplate(pathTemplate: string): string {
   const trimmed = pathTemplate.trim();
@@ -14,17 +10,21 @@ export function normalizePathTemplate(pathTemplate: string): string {
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
 
-export function interpolateMasterId(pathTemplate: string, masterId: number): string {
-  return MASTER_ID_TOKEN_PATTERNS.reduce(
-    (value, token) => value.replaceAll(token, String(masterId)),
-    normalizePathTemplate(pathTemplate)
-  );
+export function interpolateItemValue(pathTemplate: string, itemValue: string): string {
+  return normalizePathTemplate(pathTemplate).replace(PATH_TOKEN_REGEX, itemValue);
 }
 
 export function buildRequestUrl(
   baseUrl: string,
   pathTemplate: string,
-  masterId: number
+  itemValue: string,
+  queryParams?: Record<string, string>
 ): URL {
-  return new URL(interpolateMasterId(pathTemplate, masterId), baseUrl);
+  const url = new URL(interpolateItemValue(pathTemplate, itemValue), baseUrl);
+  if (queryParams) {
+    for (const [key, value] of Object.entries(queryParams)) {
+      if (key) url.searchParams.append(key, value.replace(/\{\{itemValue\}\}/gu, itemValue));
+    }
+  }
+  return url;
 }

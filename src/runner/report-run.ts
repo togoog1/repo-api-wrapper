@@ -21,7 +21,7 @@ export async function printRunReport(runId: string): Promise<void> {
     },
     select: {
       sequence: true,
-      masterId: true,
+      itemValue: true,
       attemptCount: true,
       lastHttpStatus: true,
       lastError: true

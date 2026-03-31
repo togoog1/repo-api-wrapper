@@ -46,7 +46,7 @@ interface RunEvent {
 interface RunItem {
   id: string;
   sequence: number;
-  masterId: number;
+  itemValue: string;
   status: RunItemStatus;
   attemptCount: number;
   lastHttpStatus: number | null;
@@ -66,7 +66,7 @@ interface RunDetail extends RunSummary {
   recentFailures: Array<{
     id: string;
     sequence: number;
-    masterId: number;
+    itemValue: string;
     attemptCount: number;
     lastHttpStatus: number | null;
     lastError: string | null;
@@ -75,14 +75,25 @@ interface RunDetail extends RunSummary {
   recentEvents: RunEvent[];
 }
 
+interface QueryParamRow {
+  key: string;
+  value: string;
+}
+
 interface CreateRunFormState {
   moduleSlug: string;
   endpointSlug: string;
   inputListId: string;
   label: string;
-  masterIdsRaw: string;
+  idsRaw: string;
   targetEnvironment: TargetEnvironment;
+  method: string;
   pathTemplate: string;
+  queryParams: QueryParamRow[];
+  headers: QueryParamRow[];
+  bodyType: "none" | "json" | "form" | "multipart" | "text";
+  requestBodyRaw: string;
+  formBodyRows: QueryParamRow[];
   dryRun: boolean;
   concurrency: number;
   minDelayMs: number;
@@ -120,6 +131,7 @@ interface ModuleCatalog {
       email: string;
     };
   };
+  defaultHeaders?: Record<string, string>;
   endpoints: ModuleEndpointCatalog[];
 }
 
@@ -153,9 +165,15 @@ const defaultFormState: CreateRunFormState = {
   endpointSlug: "",
   inputListId: "",
   label: "",
-  masterIdsRaw: "",
+  idsRaw: "",
   targetEnvironment: "staging",
-  pathTemplate: "/sync-onboarding/:master_id",
+  method: "POST",
+  pathTemplate: "/:id",
+  queryParams: [{ key: "", value: "" }],
+  headers: [{ key: "", value: "" }],
+  bodyType: "json",
+  requestBodyRaw: "",
+  formBodyRows: [{ key: "", value: "" }],
   dryRun: true,
   concurrency: 1,
   minDelayMs: 250,
@@ -186,30 +204,100 @@ function formatRuntime(startedAt: string | null, finishedAt: string | null): str
   return minutes === 0 ? `${remainder}s` : `${minutes}m ${remainder}s`;
 }
 
-function parseIntegerList(raw: string): number[] {
-  return raw
-    .split(/[\s,]+/u)
-    .map((v) => v.trim())
-    .filter(Boolean)
-    .map((v) => Number.parseInt(v, 10))
-    .filter((v) => !Number.isNaN(v));
+function extractPathParamName(pathTemplate: string): string | null {
+  const match = pathTemplate.match(/:[a-z][a-z0-9_]*|\{([a-z][a-z0-9_]*)\}/iu);
+  if (!match) return null;
+  return match[0].replace(/^[:{]|\}$/gu, "");
+}
+
+function parseIdList(raw: string): string[] {
+  return raw.split(/[\s,]+/u).map((v) => v.trim()).filter(Boolean);
+}
+
+function applyEnvVars(template: string, vars: QueryParamRow[]): string {
+  return vars
+    .filter((v) => v.key.trim())
+    .reduce((s, v) => s.replaceAll(`{{${v.key.trim()}}}`, v.value), template);
+}
+
+interface ParsedItemResponse {
+  body: unknown;
+  headers: Record<string, string>;
+  size: number | null;
+}
+
+function parseItemResponse(raw: unknown): ParsedItemResponse {
+  if (
+    raw &&
+    typeof raw === "object" &&
+    !Array.isArray(raw) &&
+    ("body" in raw || "headers" in raw)
+  ) {
+    const r = raw as Record<string, unknown>;
+    return {
+      body: r.body,
+      headers: (r.headers as Record<string, string>) ?? {},
+      size: typeof r.size === "number" ? r.size : null,
+    };
+  }
+  return { body: raw, headers: {}, size: null };
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function syntaxHighlightJson(value: unknown): string {
+  if (typeof value === "string" && !value.startsWith("{") && !value.startsWith("[")) {
+    return `<span class="json-str">${escapeHtml(value)}</span>`;
+  }
+  let json: string;
+  try {
+    json = JSON.stringify(value, null, 2);
+  } catch {
+    return escapeHtml(String(value));
+  }
+  return json.replace(
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+    (match) => {
+      let cls = "json-num";
+      if (/^"/.test(match)) {
+        cls = /:$/.test(match) ? "json-key" : "json-str";
+      } else if (/true|false/.test(match)) {
+        cls = "json-bool";
+      } else if (/null/.test(match)) {
+        cls = "json-null";
+      }
+      return `<span class="${cls}">${match}</span>`;
+    }
+  );
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function buildPreviewUrl(input: {
   baseUrl?: string;
   pathTemplate: string;
-  masterIdsRaw: string;
+  idsRaw: string;
+  queryParams?: QueryParamRow[];
+  envVars?: QueryParamRow[];
 }): string {
-  const sampleId = parseIntegerList(input.masterIdsRaw)[0] ?? 12345;
-  const normalizedPath = input.pathTemplate.trim().startsWith("/")
-    ? input.pathTemplate.trim()
-    : `/${input.pathTemplate.trim()}`;
-  const resolved = normalizedPath
-    .replaceAll(":master_id", String(sampleId))
-    .replaceAll("{master_id}", String(sampleId));
-  if (!input.baseUrl) return resolved;
+  const ev = input.envVars ?? [];
+  const sampleId = parseIdList(input.idsRaw)[0] ?? "12345";
+  const rawPath = applyEnvVars(input.pathTemplate.trim(), ev);
+  const normalizedPath = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
+  const resolved = normalizedPath.replace(/:[a-z][a-z0-9_]*|\{[a-z][a-z0-9_]*\}/giu, String(sampleId));
+  const activeParams = (input.queryParams ?? []).filter((p) => p.key.trim());
   try {
-    return new URL(resolved, input.baseUrl).toString();
+    const url = new URL(resolved, input.baseUrl ?? "http://x");
+    for (const { key, value } of activeParams) {
+      url.searchParams.append(key.trim(), applyEnvVars(value, ev));
+    }
+    return input.baseUrl ? url.toString() : url.pathname + url.search;
   } catch {
     return resolved;
   }
@@ -307,6 +395,36 @@ function applyCatalogDefaults(input: {
     (cfg.targetEnvironment as TargetEnvironment | undefined) ??
     input.moduleDefinition.defaultTargetEnvironment;
 
+  const cfgQueryParams =
+    cfg.queryParams && typeof cfg.queryParams === "object" && !Array.isArray(cfg.queryParams)
+      ? (cfg.queryParams as Record<string, string>)
+      : null;
+  const queryParamRows: QueryParamRow[] = cfgQueryParams
+    ? [...Object.entries(cfgQueryParams).map(([key, value]) => ({ key, value })), { key: "", value: "" }]
+    : [{ key: "", value: "" }];
+
+  const cfgHeaders =
+    cfg.headers && typeof cfg.headers === "object" && !Array.isArray(cfg.headers)
+      ? (cfg.headers as Record<string, string>)
+      : null;
+  const headerRows: QueryParamRow[] = cfgHeaders
+    ? [...Object.entries(cfgHeaders).map(([key, value]) => ({ key, value })), { key: "", value: "" }]
+    : [{ key: "", value: "" }];
+
+  const cfgFormBody =
+    cfg.formBody && typeof cfg.formBody === "object" && !Array.isArray(cfg.formBody)
+      ? (cfg.formBody as Record<string, string>)
+      : null;
+  const formBodyRows: QueryParamRow[] = cfgFormBody
+    ? [...Object.entries(cfgFormBody).map(([key, value]) => ({ key, value })), { key: "", value: "" }]
+    : [{ key: "", value: "" }];
+
+  const bodyType =
+    typeof cfg.bodyType === "string" &&
+    ["none", "json", "form", "multipart", "text"].includes(cfg.bodyType)
+      ? (cfg.bodyType as "none" | "json" | "form" | "multipart" | "text")
+      : input.current.bodyType;
+
   return {
     ...input.current,
     moduleSlug: input.moduleDefinition.slug,
@@ -314,10 +432,19 @@ function applyCatalogDefaults(input: {
     inputListId: "",
     label: input.current.label || ep?.defaultRunLabel || "",
     targetEnvironment: env,
+    method: typeof cfg.method === "string" ? cfg.method : (ep?.method ?? "POST"),
     pathTemplate:
       typeof cfg.pathTemplate === "string"
         ? cfg.pathTemplate
-        : ep?.pathTemplate ?? "/sync-onboarding/:master_id",
+        : ep?.pathTemplate ?? "/:id",
+    queryParams: queryParamRows,
+    headers: headerRows,
+    bodyType,
+    formBodyRows,
+    requestBodyRaw:
+      cfg.requestBody && typeof cfg.requestBody === "object"
+        ? JSON.stringify(cfg.requestBody, null, 2)
+        : "",
     dryRun: typeof cfg.dryRun === "boolean" ? cfg.dryRun : input.current.dryRun,
     concurrency:
       typeof cfg.concurrency === "number" ? cfg.concurrency : input.current.concurrency,
@@ -382,15 +509,23 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
 
   const [navSearch, setNavSearch] = useState("");
-  const [workspaceTab, setWorkspaceTab] = useState<"params" | "pacing">("params");
+  const [workspaceTab, setWorkspaceTab] = useState<"params" | "body" | "headers" | "pacing">("params");
   const [responseTab, setResponseTab] = useState<"items" | "events" | "config">("items");
   const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
   const [openModules, setOpenModules] = useState<Set<string>>(new Set());
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
-  const [sidebarView, setSidebarView] = useState<"collections" | "history" | "input-lists" | "settings">("collections");
+  const [sidebarView, setSidebarView] = useState<"collections" | "history" | "input-lists" | "env" | "settings">("collections");
   const [sendMenuOpen, setSendMenuOpen] = useState(false);
   const [contextMenuEndpoint, setContextMenuEndpoint] = useState<{ slug: string; x: number; y: number } | null>(null);
+  const [envVars, setEnvVars] = useState<QueryParamRow[]>(() => {
+    try {
+      const stored = localStorage.getItem("rav:env-vars");
+      return stored ? (JSON.parse(stored) as QueryParamRow[]) : [{ key: "", value: "" }];
+    } catch {
+      return [{ key: "", value: "" }];
+    }
+  });
   const [requestPanelHeight, setRequestPanelHeight] = useState<number | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(260);
   const resizeDragRef = useRef<{ startY: number; startHeight: number } | null>(null);
@@ -467,6 +602,10 @@ export function App() {
     void loadRuns();
     void loadInputLists();
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem("rav:env-vars", JSON.stringify(envVars));
+  }, [envVars]);
 
   useEffect(() => {
     if (!selectedRunId) {
@@ -552,9 +691,18 @@ export function App() {
   const previewUrl = buildPreviewUrl({
     baseUrl: selectedModule?.environments[formState.targetEnvironment]?.baseUrl,
     pathTemplate: formState.pathTemplate,
-    masterIdsRaw: formState.masterIdsRaw,
+    idsRaw: formState.idsRaw,
+    queryParams: formState.queryParams,
+    envVars,
   });
-  const masterIdCount = parseIntegerList(formState.masterIdsRaw).length;
+  const idCount = parseIdList(formState.idsRaw).length;
+  const pathParamName = extractPathParamName(formState.pathTemplate);
+  const idsLabel = pathParamName
+    ? pathParamName.replace(/_/gu, " ")
+    : "IDs";
+  const idsPlaceholder = pathParamName
+    ? `101, 204, 330 — one ${pathParamName} per request`
+    : "101, 204, 330 or newline separated";
 
   /* handlers */
   function toggleFolder(group: string) {
@@ -587,7 +735,7 @@ export function App() {
     if (!targetModule) return;
     setFormState((cur) =>
       applyCatalogDefaults({
-        current: { ...cur, label: "", masterIdsRaw: "", inputListId: "" },
+        current: { ...cur, label: "", idsRaw: "", inputListId: "" },
         moduleDefinition: targetModule,
         endpointDefinition: endpoint,
       })
@@ -674,14 +822,60 @@ export function App() {
     setSubmitting(true);
     setError(null);
     try {
+      // Apply env var substitution helpers
+      const ev = envVars.filter((v) => v.key.trim());
+      const sub = (s: string) => applyEnvVars(s, ev);
+
+      // Build body fields based on bodyType
+      const bodyType = formState.bodyType;
+      let requestBody: Record<string, unknown> | undefined;
+      let formBody: Record<string, string> | undefined;
+      let requestBodyText: string | undefined;
+
+      if (bodyType === "json" && formState.requestBodyRaw.trim()) {
+        try {
+          requestBody = JSON.parse(sub(formState.requestBodyRaw)) as Record<string, unknown>;
+        } catch {
+          setError("Request body is not valid JSON");
+          setSubmitting(false);
+          return;
+        }
+      } else if (bodyType === "form" || bodyType === "multipart") {
+        const fbEntries = formState.formBodyRows.filter((p) => p.key.trim());
+        if (fbEntries.length > 0) {
+          formBody = Object.fromEntries(fbEntries.map((p) => [p.key.trim(), sub(p.value)]));
+        }
+      } else if (bodyType === "text") {
+        requestBodyText = sub(formState.requestBodyRaw);
+      }
+
+      const qpEntries = formState.queryParams.filter((p) => p.key.trim());
+      const queryParams =
+        qpEntries.length > 0
+          ? Object.fromEntries(qpEntries.map((p) => [p.key.trim(), sub(p.value)]))
+          : undefined;
+
+      const hEntries = formState.headers.filter((p) => p.key.trim());
+      const moduleDefaultHeaders = selectedModule?.defaultHeaders ?? {};
+      const perRequestHeaders = Object.fromEntries(hEntries.map((p) => [p.key.trim(), sub(p.value)]));
+      const mergedHeaders = { ...moduleDefaultHeaders, ...perRequestHeaders };
+      const headers = Object.keys(mergedHeaders).length > 0 ? mergedHeaders : undefined;
+
       const payload = {
         moduleSlug: formState.moduleSlug || undefined,
         endpointSlug: formState.endpointSlug || undefined,
         inputListId: formState.inputListId || undefined,
         label: formState.label || undefined,
-        masterIds: parseIntegerList(formState.masterIdsRaw),
+        itemValues: parseIdList(formState.idsRaw).filter((id) => id !== "0"),
         targetEnvironment: formState.targetEnvironment,
-        pathTemplate: formState.pathTemplate,
+        method: formState.method || undefined,
+        pathTemplate: sub(formState.pathTemplate),
+        queryParams,
+        headers,
+        bodyType,
+        requestBody,
+        formBody,
+        requestBodyText,
         dryRun: formState.dryRun,
         concurrency: formState.concurrency,
         minDelayMs: formState.minDelayMs,
@@ -696,13 +890,15 @@ export function App() {
         stopAfterConsecutiveFailures: formState.stopAfterConsecutiveFailures
           ? Number.parseInt(formState.stopAfterConsecutiveFailures, 10)
           : undefined,
-        stopOnHttpStatuses: parseIntegerList(formState.stopOnHttpStatuses),
+        stopOnHttpStatuses: formState.stopOnHttpStatuses
+          .split(/[\s,]+/u).map((v) => v.trim()).filter(Boolean)
+          .map((v) => Number.parseInt(v, 10)).filter((v) => !Number.isNaN(v)),
       };
-      const res = await requestJson<{ runId: string }>("/api/runs/sync-onboarding", {
+      const res = await requestJson<{ runId: string }>("/api/runs/http-request", {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      setFormState((cur) => ({ ...cur, label: "", masterIdsRaw: "" }));
+      setFormState((cur) => ({ ...cur, label: "", idsRaw: "" }));
       await loadRuns();
       setSelectedRunId(res.runId);
       setResponseTab("items");
@@ -739,9 +935,9 @@ export function App() {
   }
 
   async function handleSaveCurrentInputList() {
-    const masterIds = parseIntegerList(formState.masterIdsRaw);
-    if (masterIds.length === 0) {
-      setError("Add at least one master ID before saving a list.");
+    const ids = parseIdList(formState.idsRaw);
+    if (ids.length === 0) {
+      setError("Add at least one ID before saving a list.");
       return;
     }
     setSavingInputList(true);
@@ -752,8 +948,8 @@ export function App() {
         body: JSON.stringify({
           label: newInputListLabel.trim() || `${selectedModule?.label ?? "input"} list`,
           moduleSlug: formState.moduleSlug || undefined,
-          itemType: "master_id",
-          data: masterIds,
+          itemType: "item_value",
+          data: ids,
         }),
       });
       setFormState((cur) => ({ ...cur, inputListId: created.id }));
@@ -793,7 +989,7 @@ export function App() {
       setFormState((cur) => ({
         ...cur,
         inputListId: created.id,
-        masterIdsRaw: formatInputListData(created.data),
+        idsRaw: formatInputListData(created.data),
       }));
       setSuccessMessage(`Failures saved as "${created.label}"`);
       setTimeout(() => setSuccessMessage(null), 4000);
@@ -820,7 +1016,7 @@ export function App() {
     setFormState((cur) => ({
       ...cur,
       inputListId: il.id,
-      masterIdsRaw: formatInputListData(il.data),
+      idsRaw: formatInputListData(il.data),
     }));
     setSidebarView("collections");
     setSuccessMessage(`Loaded "${il.label}" (${il.itemCount} items)`);
@@ -877,15 +1073,63 @@ export function App() {
 
   function handleCopyAsCliCommand() {
     if (!selectedEndpoint) return;
-    const ids = parseIntegerList(formState.masterIdsRaw);
-    const parts = ["yarn sync:onboarding"];
-    if (ids.length > 0) parts.push(`--master-ids ${ids.join(",")}`);
+    const ids = parseIdList(formState.idsRaw);
+    const parts = ["yarn run"];
+    if (ids.length > 0) parts.push(`--ids ${ids.join(",")}`);
     if (formState.dryRun) parts.push("--dry-run");
     if (formState.targetEnvironment !== "staging") parts.push(`--env ${formState.targetEnvironment}`);
     if (formState.concurrency > 1) parts.push(`--concurrency ${formState.concurrency}`);
     void navigator.clipboard.writeText(parts.join(" "));
     setSuccessMessage("CLI command copied to clipboard.");
     setTimeout(() => setSuccessMessage(null), 3000);
+  }
+
+  function formatItemDuration(item: RunItem): string | null {
+    if (!item.startedAt) return null;
+    const end = item.finishedAt ? new Date(item.finishedAt).getTime() : Date.now();
+    const ms = end - new Date(item.startedAt).getTime();
+    return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+  }
+
+  function exportAsPostman(mod: ModuleCatalog) {
+    const baseUrl = mod.environments[formState.targetEnvironment]?.baseUrl ?? "";
+    const collection = {
+      info: {
+        name: mod.label,
+        description: mod.description ?? "",
+        schema: "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+      },
+      item: mod.endpoints.map((ep) => ({
+        name: ep.label,
+        request: {
+          method: ep.method,
+          description: ep.description,
+          header: [] as unknown[],
+          url: {
+            raw: `{{baseUrl}}${ep.pathTemplate}`,
+            host: ["{{baseUrl}}"],
+            path: ep.pathTemplate.replace(/^\//, "").split("/"),
+          },
+          body: ["POST", "PUT", "PATCH"].includes(ep.method)
+            ? {
+                mode: "raw",
+                raw: ep.defaultRunConfig?.requestBody
+                  ? JSON.stringify(ep.defaultRunConfig.requestBody, null, 2)
+                  : "{}",
+                options: { raw: { language: "json" } },
+              }
+            : undefined,
+        },
+      })),
+      variable: [{ key: "baseUrl", value: baseUrl, type: "string" }],
+    };
+    const blob = new Blob([JSON.stringify(collection, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${mod.slug}-collection.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   function handleCopyPathTemplate(ep: ModuleEndpointCatalog) {
@@ -974,6 +1218,12 @@ export function App() {
             <line x1="3" y1="18" x2="3.01" y2="18" />
           </svg>
         </button>
+        <button className={`rail-btn ${sidebarView === "env" ? "active" : ""}`} type="button" title="Environment Variables" onClick={() => setSidebarView("env")}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="2" />
+            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+          </svg>
+        </button>
         <div className="rail-spacer" />
         <button className={`rail-btn ${sidebarView === "settings" ? "active" : ""}`} type="button" title="Settings" onClick={() => setSidebarView("settings")}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1025,6 +1275,13 @@ export function App() {
                     e.target.value = "";
                   }}
                 />
+                {selectedModule ? (
+                  <button
+                    className="sidebar-action-btn"
+                    type="button"
+                    onClick={() => exportAsPostman(selectedModule)}
+                  >Export</button>
+                ) : null}
                 <button
                   className="sidebar-action-btn"
                   type="button"
@@ -1239,6 +1496,61 @@ export function App() {
               {inputLists.length} lists
             </div>
           </>
+        ) : sidebarView === "env" ? (
+          <>
+            <div className="sidebar-header">
+              <span className="sidebar-title">Environment</span>
+            </div>
+            <div className="tree">
+              <div className="settings-panel">
+                <p className="env-vars-hint">
+                  Define variables to use as <code>{"{{varName}}"}</code> in URLs, headers, query params, and request bodies. Saved to browser storage.
+                </p>
+                <div className="query-params-table">
+                  {envVars.map((row, i) => (
+                    <div key={i} className="query-param-row">
+                      <input
+                        className="query-param-key"
+                        placeholder="Variable name"
+                        value={row.key}
+                        onChange={(e) => {
+                          const next = envVars.map((r, j) =>
+                            j === i ? { ...r, key: e.target.value } : r
+                          );
+                          const last = next[next.length - 1];
+                          if (last.key || last.value) next.push({ key: "", value: "" });
+                          setEnvVars(next);
+                        }}
+                      />
+                      <input
+                        className="query-param-value"
+                        placeholder="Value"
+                        value={row.value}
+                        onChange={(e) => {
+                          const next = envVars.map((r, j) =>
+                            j === i ? { ...r, value: e.target.value } : r
+                          );
+                          const last = next[next.length - 1];
+                          if (last.key || last.value) next.push({ key: "", value: "" });
+                          setEnvVars(next);
+                        }}
+                      />
+                      {(row.key || row.value) ? (
+                        <button
+                          type="button"
+                          className="remove-param-btn"
+                          onClick={() => setEnvVars((cur) => cur.filter((_, j) => j !== i))}
+                        >×</button>
+                      ) : <span className="remove-param-btn" />}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="sidebar-footer">
+              {envVars.filter((v) => v.key.trim()).length} variables active
+            </div>
+          </>
         ) : (
           <>
             <div className="sidebar-header">
@@ -1377,11 +1689,17 @@ export function App() {
           <>
             {/* URL bar */}
             <form className="url-bar" onSubmit={handleCreateRun}>
-              <span
-                className={`url-method-select ${selectedEndpoint.method.toLowerCase()}`}
+              <select
+                className={`url-method-select ${formState.method.toLowerCase()}`}
+                value={formState.method}
+                onChange={(e) =>
+                  setFormState((cur) => ({ ...cur, method: e.target.value }))
+                }
               >
-                {selectedEndpoint.method}
-              </span>
+                {["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
               <input
                 className="url-input"
                 value={previewUrl}
@@ -1408,7 +1726,7 @@ export function App() {
               <div className="send-button-group">
                 <button
                   className="send-button-main"
-                  disabled={submitting || masterIdCount === 0}
+                  disabled={submitting || (pathParamName !== null && idCount === 0 && !formState.inputListId)}
                   type="submit"
                 >
                   {submitting ? "Sending..." : "Send"}
@@ -1431,7 +1749,7 @@ export function App() {
                         const form = document.querySelector<HTMLFormElement>(".url-bar");
                         if (form) form.requestSubmit();
                       }}
-                      disabled={submitting || masterIdCount === 0}
+                      disabled={submitting || (pathParamName !== null && idCount === 0 && !formState.inputListId)}
                     >
                       Send (live)
                     </button>
@@ -1443,7 +1761,7 @@ export function App() {
                         const form = document.querySelector<HTMLFormElement>(".url-bar");
                         if (form) form.requestSubmit();
                       }}
-                      disabled={submitting || masterIdCount === 0}
+                      disabled={submitting || (pathParamName !== null && idCount === 0 && !formState.inputListId)}
                     >
                       Send (dry run)
                     </button>
@@ -1471,6 +1789,20 @@ export function App() {
                 Params
               </button>
               <button
+                className={workspaceTab === "body" ? "active" : ""}
+                onClick={() => setWorkspaceTab("body")}
+                type="button"
+              >
+                Body{formState.bodyType !== "none" && (formState.requestBodyRaw.trim() || formState.formBodyRows.some((r) => r.key.trim())) ? " •" : ""}
+              </button>
+              <button
+                className={workspaceTab === "headers" ? "active" : ""}
+                onClick={() => setWorkspaceTab("headers")}
+                type="button"
+              >
+                Headers{formState.headers.filter((h) => h.key.trim()).length > 0 ? ` (${formState.headers.filter((h) => h.key.trim()).length})` : ""}
+              </button>
+              <button
                 className={workspaceTab === "pacing" ? "active" : ""}
                 onClick={() => setWorkspaceTab("pacing")}
                 type="button"
@@ -1488,7 +1820,73 @@ export function App() {
                 <p className="endpoint-notes">{selectedEndpoint.notes}</p>
               ) : null}
 
-              {workspaceTab === "params" ? (
+              {workspaceTab === "headers" ? (
+                <div className="params-content">
+                  <div className="query-params-section">
+                    <span className="section-label">Request headers <span className="section-label-hint">Use <code>{"{{itemValue}}"}</code> to inject the current item</span></span>
+                    <div className="query-params-table">
+                      {formState.headers.map((row, i) => (
+                        <div key={i} className="query-param-row">
+                          <input
+                            className="query-param-key"
+                            placeholder="Header name"
+                            value={row.key}
+                            onChange={(e) => {
+                              const next = formState.headers.map((r, j) =>
+                                j === i ? { ...r, key: e.target.value } : r
+                              );
+                              const last = next[next.length - 1];
+                              if (last.key || last.value) next.push({ key: "", value: "" });
+                              setFormState((cur) => ({ ...cur, headers: next }));
+                            }}
+                          />
+                          <input
+                            className="query-param-value"
+                            placeholder="Value"
+                            value={row.value}
+                            onChange={(e) => {
+                              const next = formState.headers.map((r, j) =>
+                                j === i ? { ...r, value: e.target.value } : r
+                              );
+                              const last = next[next.length - 1];
+                              if (last.key || last.value) next.push({ key: "", value: "" });
+                              setFormState((cur) => ({ ...cur, headers: next }));
+                            }}
+                          />
+                          {(row.key || row.value) ? (
+                            <button
+                              type="button"
+                              className="remove-param-btn"
+                              onClick={() =>
+                                setFormState((cur) => ({
+                                  ...cur,
+                                  headers: cur.headers.filter((_, j) => j !== i)
+                                }))
+                              }
+                            >×</button>
+                          ) : <span className="remove-param-btn" />}
+                        </div>
+                      ))}
+                    </div>
+                    <p className="section-hint">Authorization and Content-Type are set automatically. Per-request headers override collection headers.</p>
+                  </div>
+
+                  {selectedModule?.defaultHeaders && Object.keys(selectedModule.defaultHeaders).length > 0 ? (
+                    <div className="query-params-section">
+                      <span className="section-label">Collection headers <span className="section-label-hint">Inherited from {selectedModule.label} — override above</span></span>
+                      <div className="query-params-table">
+                        {Object.entries(selectedModule.defaultHeaders).map(([key, value]) => (
+                          <div key={key} className="query-param-row collection-header-row">
+                            <input className="query-param-key" value={key} readOnly tabIndex={-1} />
+                            <input className="query-param-value" value={value} readOnly tabIndex={-1} />
+                            <span className="remove-param-btn" />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : workspaceTab === "params" ? (
                 <div className="params-content">
                   <div className="params-row">
                     <label className="param-field">
@@ -1514,7 +1912,7 @@ export function App() {
                           setFormState((cur) => ({
                             ...cur,
                             inputListId: il.id,
-                            masterIdsRaw: formatInputListData(il.data),
+                            idsRaw: formatInputListData(il.data),
                           }));
                         }}
                       >
@@ -1526,34 +1924,85 @@ export function App() {
                         ))}
                       </select>
                     </label>
-                    <label className="param-field">
-                      <span>Path template</span>
-                      <input
-                        value={formState.pathTemplate}
-                        onChange={(e) =>
-                          setFormState((cur) => ({ ...cur, pathTemplate: e.target.value }))
-                        }
-                      />
-                    </label>
                   </div>
 
-                  <div className="master-ids-section">
+                  <label className="param-field">
+                    <span>Path template</span>
+                    <input
+                      value={formState.pathTemplate}
+                      onChange={(e) =>
+                        setFormState((cur) => ({ ...cur, pathTemplate: e.target.value }))
+                      }
+                      placeholder="/path/:id"
+                    />
+                  </label>
+
+                  <div className="query-params-section">
+                    <span className="section-label">Query params <span className="section-label-hint">Use <code>{"{{itemValue}}"}</code> in values to inject the current item</span></span>
+                    <div className="query-params-table">
+                      {formState.queryParams.map((row, i) => (
+                        <div key={i} className="query-param-row">
+                          <input
+                            className="query-param-key"
+                            placeholder="Key"
+                            value={row.key}
+                            onChange={(e) => {
+                              const next = formState.queryParams.map((r, j) =>
+                                j === i ? { ...r, key: e.target.value } : r
+                              );
+                              // auto-add trailing empty row
+                              const last = next[next.length - 1];
+                              if (last.key || last.value) next.push({ key: "", value: "" });
+                              setFormState((cur) => ({ ...cur, queryParams: next }));
+                            }}
+                          />
+                          <input
+                            className="query-param-value"
+                            placeholder="Value"
+                            value={row.value}
+                            onChange={(e) => {
+                              const next = formState.queryParams.map((r, j) =>
+                                j === i ? { ...r, value: e.target.value } : r
+                              );
+                              const last = next[next.length - 1];
+                              if (last.key || last.value) next.push({ key: "", value: "" });
+                              setFormState((cur) => ({ ...cur, queryParams: next }));
+                            }}
+                          />
+                          {(row.key || row.value) ? (
+                            <button
+                              type="button"
+                              className="remove-param-btn"
+                              onClick={() =>
+                                setFormState((cur) => ({
+                                  ...cur,
+                                  queryParams: cur.queryParams.filter((_, j) => j !== i)
+                                }))
+                              }
+                            >×</button>
+                          ) : <span className="remove-param-btn" />}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="ids-section">
                     <label className="param-field param-field-grow">
-                      <span>Master IDs {masterIdCount > 0 ? `(${masterIdCount})` : ""}</span>
+                      <span>{idsLabel}{idCount > 0 ? ` (${idCount})` : ""}</span>
                       <textarea
                         rows={4}
-                        value={formState.masterIdsRaw}
+                        value={formState.idsRaw}
                         onChange={(e) =>
                           setFormState((cur) => ({
                             ...cur,
                             inputListId: "",
-                            masterIdsRaw: e.target.value,
+                            idsRaw: e.target.value,
                           }))
                         }
-                        placeholder="101, 204, 330 or newline separated"
+                        placeholder={idsPlaceholder}
                       />
                     </label>
-                    {masterIdCount > 0 ? (
+                    {idCount > 0 ? (
                       <div className="save-ids-row">
                         <input
                           value={newInputListLabel}
@@ -1572,11 +2021,105 @@ export function App() {
                     ) : null}
                   </div>
 
-                  {selectedEndpoint.requestBodyDescription ? (
-                    <p className="endpoint-notes">
-                      Body: {selectedEndpoint.requestBodyDescription}
-                    </p>
-                  ) : null}
+                </div>
+              ) : workspaceTab === "body" ? (
+                <div className="params-content">
+                  <div className="body-type-row">
+                    <span className="section-label">Body type</span>
+                    <div className="body-type-buttons">
+                      {(["none", "json", "form", "multipart", "text"] as const).map((bt) => (
+                        <button
+                          key={bt}
+                          type="button"
+                          className={`body-type-btn${formState.bodyType === bt ? " active" : ""}`}
+                          onClick={() => setFormState((cur) => ({ ...cur, bodyType: bt }))}
+                        >
+                          {bt === "multipart" ? "multipart" : bt}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {formState.bodyType === "none" ? (
+                    <p className="section-hint body-none-hint">No body will be sent with this request.</p>
+                  ) : formState.bodyType === "form" || formState.bodyType === "multipart" ? (
+                    <div className="query-params-section">
+                      <span className="section-label">
+                        {formState.bodyType === "multipart" ? "Form fields (multipart/form-data)" : "Form fields (x-www-form-urlencoded)"}
+                        <span className="section-label-hint"> — Use <code>{"{{itemValue}}"}</code> or <code>{"{{varName}}"}</code> in values</span>
+                      </span>
+                      <div className="query-params-table">
+                        {formState.formBodyRows.map((row, i) => (
+                          <div key={i} className="query-param-row">
+                            <input
+                              className="query-param-key"
+                              placeholder="Field name"
+                              value={row.key}
+                              onChange={(e) => {
+                                const next = formState.formBodyRows.map((r, j) =>
+                                  j === i ? { ...r, key: e.target.value } : r
+                                );
+                                const last = next[next.length - 1];
+                                if (last.key || last.value) next.push({ key: "", value: "" });
+                                setFormState((cur) => ({ ...cur, formBodyRows: next }));
+                              }}
+                            />
+                            <input
+                              className="query-param-value"
+                              placeholder="Value"
+                              value={row.value}
+                              onChange={(e) => {
+                                const next = formState.formBodyRows.map((r, j) =>
+                                  j === i ? { ...r, value: e.target.value } : r
+                                );
+                                const last = next[next.length - 1];
+                                if (last.key || last.value) next.push({ key: "", value: "" });
+                                setFormState((cur) => ({ ...cur, formBodyRows: next }));
+                              }}
+                            />
+                            {(row.key || row.value) ? (
+                              <button
+                                type="button"
+                                className="remove-param-btn"
+                                onClick={() =>
+                                  setFormState((cur) => ({
+                                    ...cur,
+                                    formBodyRows: cur.formBodyRows.filter((_, j) => j !== i),
+                                  }))
+                                }
+                              >×</button>
+                            ) : <span className="remove-param-btn" />}
+                          </div>
+                        ))}
+                      </div>
+                      <p className="section-hint">
+                        {formState.bodyType === "multipart"
+                          ? "Sent as multipart/form-data. Content-Type boundary is set automatically."
+                          : "Sent as application/x-www-form-urlencoded."}
+                      </p>
+                    </div>
+                  ) : (
+                    <label className="param-field">
+                      <span>
+                        {formState.bodyType === "text" ? "Plain text body" : "JSON body"}
+                        {selectedEndpoint.requestBodyDescription ? ` — ${selectedEndpoint.requestBodyDescription}` : ""}
+                        <span className="section-label-hint"> — Use <code>{"{{itemValue}}"}</code> or <code>{"{{varName}}"}</code></span>
+                      </span>
+                      <textarea
+                        rows={10}
+                        value={formState.requestBodyRaw}
+                        onChange={(e) =>
+                          setFormState((cur) => ({ ...cur, requestBodyRaw: e.target.value }))
+                        }
+                        placeholder={
+                          formState.bodyType === "text"
+                            ? `Plain text body\n\nUse {{itemValue}} to inject the current item`
+                            : `{\n  "key": "value",\n  "id": "{{itemValue}}"\n}\n\nLeave empty to use default { dry_run } body`
+                        }
+                        style={{ fontFamily: "monospace", fontSize: "0.8rem" }}
+                      />
+                    </label>
+                  )}
                 </div>
               ) : (
                 <div className="pacing-grid">
@@ -1824,9 +2367,10 @@ export function App() {
                                 <tr>
                                   {[
                                     { label: "Seq", accessor: (i: RunItem) => String(i.sequence) },
-                                    { label: "Master ID", accessor: (i: RunItem) => String(i.masterId) },
+                                    { label: "ID", accessor: (i: RunItem) => i.itemValue },
                                     { label: "Status", accessor: (i: RunItem) => i.status.toLowerCase() },
                                     { label: "HTTP", accessor: (i: RunItem) => String(i.lastHttpStatus ?? "") },
+                                    { label: "Time", accessor: (i: RunItem) => formatItemDuration(i) ?? "" },
                                     { label: "Error", accessor: (i: RunItem) => i.lastError ?? "" },
                                   ].map((col) => (
                                     <th key={col.label}>
@@ -1859,7 +2403,7 @@ export function App() {
                                     onClick={() => setSelectedItemId(item.id)}
                                   >
                                     <td>{item.sequence}</td>
-                                    <td>{item.masterId}</td>
+                                    <td>{item.itemValue}</td>
                                     <td>
                                       <span
                                         className={`status-tag status-${item.status.toLowerCase()}`}
@@ -1868,6 +2412,7 @@ export function App() {
                                       </span>
                                     </td>
                                     <td>{item.lastHttpStatus ?? "\u2013"}</td>
+                                    <td className="dim-cell">{formatItemDuration(item) ?? "\u2013"}</td>
                                     <td className="truncate-cell">{item.lastError ?? "\u2014"}</td>
                                   </tr>
                                 ))}
@@ -1889,79 +2434,84 @@ export function App() {
                                 </span>
                               ) : null}
                             </div>
-                            {selectedItem ? (
+                            {selectedItem ? (() => {
+                              const parsedResp = parseItemResponse(selectedItem.response);
+                              const respHeaderEntries = Object.entries(parsedResp.headers);
+                              const copyIcon = (
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                </svg>
+                              );
+                              return (
                               <div className="inspector-sections">
                                 <div className="inspector-meta">
-                                  <span>master_id {selectedItem.masterId}</span>
-                                  <span>attempts {selectedItem.attemptCount}</span>
-                                  <span>http {selectedItem.lastHttpStatus ?? "\u2013"}</span>
+                                  <span>{selectedItem.itemValue}</span>
+                                  <span className={`status-tag status-${selectedItem.status.toLowerCase()}`}>{selectedItem.lastHttpStatus ?? "\u2013"}</span>
+                                  {formatItemDuration(selectedItem) ? (
+                                    <span className="inspector-duration">{formatItemDuration(selectedItem)}</span>
+                                  ) : null}
+                                  {parsedResp.size !== null ? (
+                                    <span className="inspector-size">{formatBytes(parsedResp.size)}</span>
+                                  ) : null}
+                                  <span className="inspector-attempts">×{selectedItem.attemptCount}</span>
                                 </div>
                                 <div className="inspector-block">
                                   <div className="inspector-block-header">
                                     <span>Request</span>
-                                    <button
-                                      type="button"
-                                      className="copy-col-btn"
-                                      title="Copy request"
-                                      onClick={() => {
-                                        void navigator.clipboard.writeText(formatStructuredValue(selectedItem.request));
-                                        flashCopied("Request copied!");
-                                      }}
-                                    >
-                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                                      </svg>
+                                    <button type="button" className="copy-col-btn" title="Copy request"
+                                      onClick={() => { void navigator.clipboard.writeText(formatStructuredValue(selectedItem.request)); flashCopied("Request copied!"); }}>
+                                      {copyIcon}
                                     </button>
                                   </div>
-                                  <pre>{formatStructuredValue(selectedItem.request)}</pre>
+                                  <pre dangerouslySetInnerHTML={{ __html: syntaxHighlightJson(selectedItem.request) }} />
                                 </div>
                                 <div className="inspector-block">
                                   <div className="inspector-block-header">
-                                    <span>Response</span>
-                                    <button
-                                      type="button"
-                                      className="copy-col-btn"
-                                      title="Copy response"
-                                      onClick={() => {
-                                        void navigator.clipboard.writeText(formatStructuredValue(selectedItem.response));
-                                        flashCopied("Response copied!");
-                                      }}
-                                    >
-                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                                      </svg>
+                                    <span>Response body</span>
+                                    <button type="button" className="copy-col-btn" title="Copy response"
+                                      onClick={() => { void navigator.clipboard.writeText(formatStructuredValue(parsedResp.body)); flashCopied("Response copied!"); }}>
+                                      {copyIcon}
                                     </button>
                                   </div>
-                                  <pre>{formatStructuredValue(selectedItem.response)}</pre>
+                                  <pre dangerouslySetInnerHTML={{ __html: syntaxHighlightJson(parsedResp.body) }} />
                                 </div>
-                                <div className="inspector-block">
-                                  <div className="inspector-block-header">
-                                    <span>Error</span>
-                                    {selectedItem.lastError ? (
-                                      <button
-                                        type="button"
-                                        className="copy-col-btn"
-                                        title="Copy error"
-                                        onClick={() => {
-                                          void navigator.clipboard.writeText(selectedItem.lastError ?? "");
-                                          flashCopied("Error copied!");
-                                        }}
-                                      >
-                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                                        </svg>
+                                {respHeaderEntries.length > 0 ? (
+                                  <div className="inspector-block">
+                                    <div className="inspector-block-header">
+                                      <span>Response headers</span>
+                                      <button type="button" className="copy-col-btn" title="Copy headers"
+                                        onClick={() => { void navigator.clipboard.writeText(respHeaderEntries.map(([k, v]) => `${k}: ${v}`).join("\n")); flashCopied("Headers copied!"); }}>
+                                        {copyIcon}
                                       </button>
-                                    ) : null}
+                                    </div>
+                                    <dl className="resp-headers-list">
+                                      {respHeaderEntries.map(([k, v]) => (
+                                        <div key={k} className="resp-header-row">
+                                          <dt>{k}</dt>
+                                          <dd>{v}</dd>
+                                        </div>
+                                      ))}
+                                    </dl>
                                   </div>
-                                  <pre>{selectedItem.lastError ?? "No error"}</pre>
-                                </div>
+                                ) : null}
+                                {selectedItem.lastError ? (
+                                  <div className="inspector-block inspector-block-error">
+                                    <div className="inspector-block-header">
+                                      <span>Error</span>
+                                      <button type="button" className="copy-col-btn" title="Copy error"
+                                        onClick={() => { void navigator.clipboard.writeText(selectedItem.lastError ?? ""); flashCopied("Error copied!"); }}>
+                                        {copyIcon}
+                                      </button>
+                                    </div>
+                                    <pre>{selectedItem.lastError}</pre>
+                                  </div>
+                                ) : null}
                               </div>
+                              );
+                            })() : null}
                             ) : (
                               <p className="empty-state">Select a row to inspect.</p>
-                            )}
                           </aside>
                         </div>
                       </div>

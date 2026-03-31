@@ -71,7 +71,7 @@ model RunItem {
   id             String        @id @default(cuid())
   runId          String
   sequence       Int
-  masterId       Int
+  itemValue      String
   status         RunItemStatus @default(PENDING)
   attemptCount   Int           @default(0)
   lastHttpStatus Int?
@@ -88,7 +88,7 @@ model RunItem {
 
   @@unique([runId, sequence])
   @@index([runId, status])
-  @@index([runId, masterId])
+  @@index([runId, itemValue])
 }
 
 model Attempt {

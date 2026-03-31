@@ -13,7 +13,6 @@ import { z } from "zod";
 import { appConfig } from "./config/app.js";
 import { loadModules } from "./config/module-loader.js";
 import { getPublicRuntimeConfig } from "./lib/env.js";
-import { parseCommaSeparatedIntegers } from "./lib/parse.js";
 import { prisma } from "./lib/prisma.js";
 import { targetEnvironmentSchema } from "./lib/target-environment.js";
 import {
@@ -24,7 +23,7 @@ import {
   listSavedInputLists
 } from "./services/input-lists.js";
 import {
-  createAndStartSyncOnboardingRun,
+  createAndStartHttpRequestRun,
   createRetryRunFromFailures,
   getRunOverview,
   listRunEvents,
@@ -45,9 +44,16 @@ const createRunRequestSchema = z
     endpointSlug: z.string().trim().min(1).optional(),
     inputListId: z.string().trim().min(1).optional(),
     label: z.string().trim().min(1).max(120).optional(),
-    masterIds: z.array(z.number().int().positive()).default([]),
+    itemValues: z.array(z.string().min(1)).default([]),
     targetEnvironment: targetEnvironmentSchema.optional(),
+    method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).default("POST"),
     pathTemplate: z.string().trim().min(1).optional(),
+    queryParams: z.record(z.string(), z.string()).optional(),
+    headers: z.record(z.string(), z.string()).optional(),
+    bodyType: z.enum(["none", "json", "form", "text", "multipart"]).default("json"),
+    requestBody: z.record(z.string(), z.unknown()).nullish(),
+    formBody: z.record(z.string(), z.string()).optional(),
+    requestBodyText: z.string().optional(),
     dryRun: z.boolean().default(false),
     concurrency: z.number().int().positive().default(1),
     minDelayMs: z.number().int().min(0).default(0),
@@ -58,15 +64,13 @@ const createRunRequestSchema = z
     stopAfterConsecutiveFailures: z.number().int().positive().optional(),
     stopOnHttpStatuses: z.array(z.number().int().min(100).max(599)).default([])
   })
-  .refine((value) => value.masterIds.length > 0 || Boolean(value.inputListId), {
-    message: "Provide master IDs or select a saved input list."
-  });
+  ;
 
 const createInputListRequestSchema = z.object({
   label: z.string().trim().min(1).max(120),
   description: z.string().trim().max(240).optional(),
   moduleSlug: z.string().trim().min(1).optional(),
-  itemType: z.string().trim().min(1).max(40).default("master_id"),
+  itemType: z.string().trim().min(1).max(40).default("item_value"),
   data: inputListDataSchema
 });
 
@@ -211,10 +215,10 @@ async function buildServer() {
     }
   });
 
-  app.post("/api/runs/sync-onboarding", async (request, reply) => {
+  app.post("/api/runs/http-request", async (request, reply) => {
     try {
       const body = createRunRequestSchema.parse(request.body);
-      const runId = await createAndStartSyncOnboardingRun(body);
+      const runId = await createAndStartHttpRequestRun(body);
 
       return reply.status(201).send({
         runId
@@ -292,12 +296,11 @@ async function buildServer() {
     }
   });
 
-  app.post("/api/parse/master-ids", async (request, reply) => {
+  app.post("/api/parse/ids", async (request, reply) => {
     try {
       const body = z.object({ raw: z.string() }).parse(request.body);
-      return {
-        masterIds: parseCommaSeparatedIntegers(body.raw.replace(/\s+/gu, ","))
-      };
+      const ids = body.raw.split(/[\s,]+/u).map((s) => s.trim()).filter(Boolean);
+      return { itemValues: ids };
     } catch (error) {
       const normalized = normalizeError(error);
       return reply.status(normalized.statusCode).send({

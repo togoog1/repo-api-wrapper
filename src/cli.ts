@@ -5,35 +5,23 @@ import { Command } from "commander";
 import { readFile } from "node:fs/promises";
 
 import { loadModules } from "./config/module-loader.js";
-import { syncOnboardingInputSchema } from "./actions/parse-sync-onboarding-input.js";
+import { httpRequestInputSchema } from "./actions/parse-http-request-input.js";
 import { getEnv, getPublicRuntimeConfig } from "./lib/env.js";
 import { parseInteger } from "./lib/parse.js";
 import { prisma } from "./lib/prisma.js";
 import { targetEnvironmentSchema } from "./lib/target-environment.js";
 import { executeRun } from "./runner/execute-run.js";
 import { printRunReport } from "./runner/report-run.js";
-import { createSyncOnboardingRun } from "./services/runs.js";
+import { createHttpRequestRun } from "./services/runs.js";
 
-async function readMasterIdsFromFile(filePath: string): Promise<number[]> {
+async function readIdsFromFile(filePath: string): Promise<string[]> {
   const contents = await readFile(filePath, "utf8");
-
-  return contents
-    .split(/[\s,]+/u)
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .map((value) => parseInteger(value, "master id"));
+  return contents.split(/[\s,]+/u).map((v) => v.trim()).filter(Boolean);
 }
 
-function parseMasterIds(rawValue?: string): number[] {
-  if (!rawValue) {
-    return [];
-  }
-
-  return rawValue
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .map((value) => parseInteger(value, "master id"));
+function parseIds(rawValue?: string): string[] {
+  if (!rawValue) return [];
+  return rawValue.split(",").map((v) => v.trim()).filter(Boolean);
 }
 
 const program = new Command();
@@ -41,12 +29,12 @@ const program = new Command();
 program.name("repo-api-wrapper").description("Local CLX action harness");
 
 program
-  .command("sync-onboarding")
-  .description("Create and execute a sync-onboarding run")
+  .command("run")
+  .description("Create and execute a batch HTTP request run")
   .option("--module-slug <slug>", "Module slug to use")
   .option("--endpoint-slug <slug>", "Endpoint slug within the selected module")
-  .option("--master-ids <ids>", "Comma-separated master IDs")
-  .option("--master-ids-file <path>", "File with comma or newline-separated master IDs")
+  .option("--ids <values>", "Comma-separated IDs or values")
+  .option("--ids-file <path>", "File with comma or newline-separated IDs")
   .option("--dry-run", "Send dry_run=true")
   .option(
     "--target-environment <env>",
@@ -54,7 +42,7 @@ program
   )
   .option(
     "--path-template <template>",
-    "Request path template, for example /api/v1/sync-onboarding/:master_id"
+    "Request path template, for example /api/v1/resource/:id"
   )
   .option("--label <text>", "Optional label for the run")
   .option("--concurrency <count>", "Concurrent requests", "1")
@@ -69,15 +57,15 @@ program
   )
   .option("--stop-on-http <codes>", "Comma-separated HTTP status codes that stop the run")
   .action(async (options) => {
-    const inlineMasterIds = parseMasterIds(options.masterIds);
-    const fileMasterIds = options.masterIdsFile
-      ? await readMasterIdsFromFile(options.masterIdsFile)
+    const inlineIds = parseIds(options.ids);
+    const fileIds = options.idsFile
+      ? await readIdsFromFile(options.idsFile)
       : [];
-    const stopOnHttpStatuses = parseMasterIds(options.stopOnHttp);
-    const masterIds = [...inlineMasterIds, ...fileMasterIds];
+    const stopOnHttpStatuses = parseIds(options.stopOnHttp);
+    const itemValues = [...inlineIds, ...fileIds];
 
-    const input = syncOnboardingInputSchema.parse({
-      masterIds,
+    const input = httpRequestInputSchema.parse({
+      itemValues,
       targetEnvironment: options.targetEnvironment
         ? targetEnvironmentSchema.parse(options.targetEnvironment)
         : undefined,
@@ -102,7 +90,7 @@ program
         : undefined,
       stopOnHttpStatuses
     });
-    const runId = await createSyncOnboardingRun({
+    const runId = await createHttpRequestRun({
       ...input,
       moduleSlug: options.moduleSlug,
       endpointSlug: options.endpointSlug

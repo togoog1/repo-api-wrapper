@@ -177,7 +177,7 @@ async function processRunItem(
   },
   actionName: string,
   runItemId: string,
-  masterId: number,
+  itemValue: string,
   config: BaseRunConfig,
   limiter: Bottleneck
 ): Promise<void> {
@@ -210,7 +210,7 @@ async function processRunItem(
     runItemId,
     level: "info",
     eventType: "item.started",
-    message: `Started master_id ${masterId}`
+    message: `Started ${itemValue}`
   });
 
   for (let attemptNumber = 1; attemptNumber <= config.maxRetries + 1; attemptNumber += 1) {
@@ -233,7 +233,7 @@ async function processRunItem(
     try {
       result = await limiter.schedule(() =>
         action.execute({
-          masterId,
+          itemValue,
           config,
           env,
           logger
@@ -273,7 +273,7 @@ async function processRunItem(
         runItemId,
         level: "error",
         eventType: "item.failed",
-        message: `Failed for master_id ${masterId}: ${errorMessage}`,
+        message: `Failed for ${itemValue}: ${errorMessage}`,
         data: { attemptNumber, error: errorMessage }
       });
 
@@ -317,7 +317,7 @@ async function processRunItem(
         runItemId,
         level: "info",
         eventType: "item.succeeded",
-        message: `Succeeded for master_id ${masterId}`,
+        message: `Succeeded for ${itemValue}`,
         data: {
           httpStatus: result.httpStatus,
           attemptNumber
@@ -348,7 +348,7 @@ async function processRunItem(
         runItemId,
         level: "error",
         eventType: "item.failed",
-        message: `Failed for master_id ${masterId}`,
+        message: `Failed for ${itemValue}`,
         data: {
           httpStatus: result.httpStatus,
           attemptNumber,
@@ -384,7 +384,7 @@ async function processRunItem(
       runItemId,
       level: "warn",
       eventType: "item.retrying",
-      message: `Retrying master_id ${masterId}`,
+      message: `Retrying ${itemValue}`,
       data: {
         httpStatus: result.httpStatus,
         attemptNumber,
@@ -452,7 +452,7 @@ export async function executeRun(runId: string): Promise<void> {
     },
     select: {
       id: true,
-      masterId: true
+      itemValue: true
     }
   });
 
@@ -470,7 +470,7 @@ export async function executeRun(runId: string): Promise<void> {
           },
           run.action,
           item.id,
-          item.masterId,
+          item.itemValue,
           config,
           limiter
         )

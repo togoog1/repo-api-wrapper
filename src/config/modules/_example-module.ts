@@ -43,11 +43,11 @@ export const exampleModule: ModuleDefinition = {
   endpoints: [
     {
       slug: "sync-example",
-      action: "sync-onboarding",
+      action: "http-request",
       label: "Sync example",
       description: "What this endpoint does and when you would run it.",
       method: "POST",
-      pathTemplate: "/resource/:master_id",
+      pathTemplate: "/resource/:id",
       requestBodyDescription: "{ dry_run: boolean }",
       notes: "Any auth notes, rate-limit caveats, or preconditions.",
       defaultRunLabel: "sync-example",

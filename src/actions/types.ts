@@ -5,7 +5,7 @@ import type { TargetEnvironment } from "../lib/target-environment.js";
 
 export interface BaseRunConfig {
   endpointSlug?: string;
-  masterIds: number[];
+  itemValues: string[];
   targetEnvironment: TargetEnvironment;
   pathTemplate: string;
   concurrency: number;
@@ -28,7 +28,7 @@ export interface ActionExecutionResult {
 }
 
 export interface ExecuteActionInput<TConfig extends BaseRunConfig> {
-  masterId: number;
+  itemValue: string;
   config: TConfig;
   env: EnvConfig;
   logger: Logger;

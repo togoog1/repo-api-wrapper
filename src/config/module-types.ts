@@ -39,5 +39,6 @@ export interface ModuleDefinition {
   defaultTargetEnvironment: TargetEnvironment;
   environments: Record<TargetEnvironment, ModuleEnvironmentDefinition>;
   auth: ModuleAuthDefinition;
+  defaultHeaders?: Record<string, string>;
   endpoints: ModuleEndpointDefinition[];
 }
