@@ -224,3 +224,10 @@ export const defaultFormState: CreateRunFormState = {
   timeoutMs: "",
   followRedirects: true,
 };
+
+export interface ModuleConfigDraft {
+  module: ModuleCatalog;
+  overrides: Record<string, unknown>;
+  draft: Record<string, unknown>;
+  activeSection: string;
+}

@@ -1,0 +1,60 @@
+import type { ModuleDefinition } from "../module-types.js";
+
+export const myServiceModule: ModuleDefinition = {
+  slug: "my-service",
+  serviceName: "my-service",
+  label: "My Service",
+  description: "Short summary of what this service does.",
+  defaultTargetEnvironment: "staging",
+
+  environments: {
+    staging: {
+      baseUrl: "https://my-service.staging.example.com",
+    },
+    prod: {
+      baseUrl: "https://my-service.example.com",
+    },
+  },
+
+  auth: {
+    mode: "jwt",
+    secretEnvVar: "MY_SERVICE_JWT_SECRET",
+    jwt: {
+      email: "service-account@example.com",
+      subject: undefined,
+      issuer: undefined,
+      audience: undefined,
+      expiresInSeconds: 300,
+    },
+  },
+
+  defaultHeaders: {
+    "Cache-Control": "no-cache",
+    "User-Agent": "RepoApiWrapper/1.0",
+    Accept: "*/*",
+    "Accept-Encoding": "gzip, deflate, br",
+    Connection: "keep-alive",
+  },
+
+  endpoints: [
+    {
+      slug: "sync-example",
+      action: "http-request",
+      label: "Sync example",
+      description: "What this endpoint does and when you would run it.",
+      method: "POST",
+      pathTemplate: "/resource/:master_id",
+      requestBodyDescription: "{ dry_run: boolean }",
+      notes: "Any auth notes, rate-limit caveats, or preconditions.",
+      defaultRunLabel: "sync-example",
+      defaultRunConfig: {
+        dryRun: true,
+        concurrency: 1,
+        minDelayMs: 250,
+        maxRetries: 1,
+        retryDelayMs: 1500,
+        stopOnHttpStatuses: [401, 403],
+      },
+    },
+  ],
+};

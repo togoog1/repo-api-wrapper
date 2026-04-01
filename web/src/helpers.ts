@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef, type Dispatch, type SetStateAction } from "react";
 import type {
   CreateRunFormState,
   ModuleCatalog,
@@ -378,4 +378,189 @@ export function usePolling(callback: () => void, enabled: boolean, delayMs: numb
     const id = window.setInterval(() => onTick(), delayMs);
     return () => window.clearInterval(id);
   }, [delayMs, enabled, onTick]);
+}
+
+/* ── Toast flash helper ──────────────────────────────────────────── */
+
+/**
+ * Returns a `flash(msg, durationMs?)` function that sets a success message
+ * and automatically clears it after the specified duration.
+ */
+export function useFlash(setter: Dispatch<SetStateAction<string | null>>) {
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(0 as unknown as ReturnType<typeof setTimeout>);
+  return useCallback(
+    (msg: string, durationMs = 3000) => {
+      clearTimeout(timerRef.current);
+      setter(msg);
+      timerRef.current = setTimeout(() => setter(null), durationMs);
+    },
+    [setter],
+  );
+}
+
+/* ── JSON equality ───────────────────────────────────────────────── */
+
+/** Shallow JSON-stringify equality check — avoids unnecessary React state updates in polling loops. */
+export function jsonEqual<T>(a: T, b: T): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/* ── useClickOutside ─────────────────────────────────────────────── */
+
+/**
+ * Closes a menu / popover when the user clicks outside.
+ * Pass the current open state and a setter to close it.
+ */
+export function useClickOutside<T>(
+  value: T | null,
+  close: () => void,
+  /** CSS selector — if the click target matches this, don't close */
+  ignoreSelector?: string,
+): void {
+  useEffect(() => {
+    if (value === null || value === false) return;
+    let cleanup = () => { /* noop */ };
+    const raf = requestAnimationFrame(() => {
+      const handler = (e: MouseEvent) => {
+        if (ignoreSelector) {
+          const target = e.target as HTMLElement | null;
+          if (target?.closest?.(ignoreSelector)) return;
+        }
+        close();
+      };
+      window.addEventListener("click", handler);
+      cleanup = () => window.removeEventListener("click", handler);
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      cleanup();
+    };
+  }, [value, close, ignoreSelector]);
+}
+
+/* ── useDragResize ───────────────────────────────────────────────── */
+
+/**
+ * Generic hook for mouse-drag resizing of panels.
+ *
+ * @param axis   "x" for horizontal resize, "y" for vertical
+ * @param setter State setter to update the size value
+ * @param min    Minimum allowed size
+ * @param max    Maximum allowed size (optional)
+ * @returns A `mousedown` handler to attach to the resize handle element
+ */
+export function useDragResize(
+  axis: "x" | "y",
+  setter: Dispatch<SetStateAction<number | null>> | Dispatch<SetStateAction<number>>,
+  min: number,
+  max?: number,
+) {
+  const dragRef = useRef<{ startPos: number; startSize: number } | null>(null);
+
+  return useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startPos = axis === "x" ? e.clientX : e.clientY;
+      const target = e.currentTarget as HTMLElement;
+      const parent = axis === "x" ? target.parentElement : target.previousElementSibling;
+      if (!parent) return;
+      const startSize =
+        axis === "x"
+          ? parent.getBoundingClientRect().width
+          : parent.getBoundingClientRect().height;
+      dragRef.current = { startPos, startSize };
+
+      const cursor = axis === "x" ? "col-resize" : "row-resize";
+      document.body.style.cursor = cursor;
+      document.body.style.userSelect = "none";
+
+      const onMove = (ev: MouseEvent) => {
+        if (!dragRef.current) return;
+        const pos = axis === "x" ? ev.clientX : ev.clientY;
+        const delta = pos - dragRef.current.startPos;
+        let next = dragRef.current.startSize + delta;
+        if (next < min) next = min;
+        if (max !== undefined && next > max) next = max;
+        (setter as Dispatch<SetStateAction<number>>)(next);
+      };
+
+      const onUp = () => {
+        dragRef.current = null;
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    },
+    [axis, setter, min, max],
+  );
+}
+
+/* ── Config → FormState helpers ──────────────────────────────────── */
+
+/** Safely extract a string from unknown config value */
+export function safeStr(v: unknown): string {
+  return typeof v === "string" ? v : "";
+}
+
+/** Safely extract a number from unknown config value */
+export function safeNum(v: unknown, fallback: number): number {
+  return typeof v === "number" ? v : fallback;
+}
+
+/** Convert a Record<string,string> (or null) into QueryParamRow[] with a trailing blank row */
+export function recordToRows(obj: unknown): QueryParamRow[] {
+  if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+    const entries = Object.entries(obj as Record<string, string>);
+    if (entries.length > 0) {
+      return [...entries.map(([key, value]) => ({ key, value })), { key: "", value: "" }];
+    }
+  }
+  return [{ key: "", value: "" }];
+}
+
+/* ── Postman export ──────────────────────────────────────────────── */
+
+export function exportAsPostman(mod: ModuleCatalog, targetEnvironment: TargetEnvironment): void {
+  const baseUrl = mod.environments[targetEnvironment]?.baseUrl ?? "";
+  const collection = {
+    info: {
+      name: mod.label,
+      description: mod.description ?? "",
+      schema: "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    },
+    item: mod.endpoints.map((ep) => ({
+      name: ep.label,
+      request: {
+        method: ep.method,
+        description: ep.description,
+        header: [] as unknown[],
+        url: {
+          raw: `{{baseUrl}}${ep.pathTemplate}`,
+          host: ["{{baseUrl}}"],
+          path: ep.pathTemplate.replace(/^\//, "").split("/"),
+        },
+        body: ["POST", "PUT", "PATCH"].includes(ep.method)
+          ? {
+              mode: "raw",
+              raw: ep.defaultRunConfig?.requestBody
+                ? JSON.stringify(ep.defaultRunConfig.requestBody, null, 2)
+                : "{}",
+              options: { raw: { language: "json" } },
+            }
+          : undefined,
+      },
+    })),
+    variable: [{ key: "baseUrl", value: baseUrl, type: "string" }],
+  };
+  const blob = new Blob([JSON.stringify(collection, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${mod.slug}-collection.json`;
+  a.click();
+  URL.revokeObjectURL(url);
 }

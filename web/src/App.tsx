@@ -1,22 +1,27 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  CreateRunFormState, ModuleCatalog, ModuleEndpointCatalog, NavFolderNode,
+  CreateRunFormState, ModuleCatalog, ModuleConfigDraft, ModuleEndpointCatalog, NavFolderNode,
   QueryParamRow, RunDetail, RunEvent, RunItem, RunItemStatus,
   RunSummary, RuntimeConfig, SavedInputList, Tab, TargetEnvironment,
 } from "./types";
 import { defaultFormState } from "./types";
 import {
   applyEnvVars, applyCatalogDefaults, buildFolderTree, buildPreviewUrl,
-  countTreeEndpoints, extractAllPathTokens, formatBytes,
+  countTreeEndpoints, exportAsPostman, extractAllPathTokens, formatBytes,
   formatConfigValue, formatDate, formatInputListData, formatRuntime,
   formatStructuredValue, getSelectedEndpoint, getSelectedModule,
-  highlightSearch, parseIdList, parseItemResponse, requestJson,
-  syntaxHighlightJson, usePolling,
+  highlightSearch, jsonEqual, parseIdList, parseItemResponse,
+  recordToRows, requestJson, safeNum, safeStr,
+  syntaxHighlightJson, useClickOutside, useDragResize, useFlash, usePolling,
 } from "./helpers";
 import { KeyValueTable } from "./components/KeyValueTable";
 import { Modal } from "./components/Modal";
 import { RunHistoryItem } from "./components/RunHistoryItem";
 import { VarInput, VarTextarea } from "./components/VarHighlight";
+import { ClockIcon, CopyIcon, FolderIcon, GearIcon, ListIcon, MonitorIcon, SearchIcon, SendIcon, SunIcon } from "./components/Icons";
+import ModuleConfigEditor from "./components/ModuleConfigEditor";
+import { InheritedHeaders } from "./components/InheritedHeaders";
+import { FolderNode } from "./components/FolderNode";
 /* ── App ──────────────────────────────────────────────────────────── */
 
 export function App() {
@@ -59,12 +64,7 @@ export function App() {
   const [addRequestName, setAddRequestName] = useState("");
   const [addRequestMethod, setAddRequestMethod] = useState("GET");
   const [addRequestPath, setAddRequestPath] = useState("");
-  const [moduleConfigDrafts, setModuleConfigDrafts] = useState<Record<string, {
-    module: ModuleCatalog;
-    overrides: Record<string, unknown>;
-    draft: Record<string, unknown>;
-    activeSection: string;
-  }>>({});
+  const [moduleConfigDrafts, setModuleConfigDrafts] = useState<Record<string, ModuleConfigDraft>>({});
   const [moduleConfigSaving, setModuleConfigSaving] = useState(false);
   const [bakeConfirmSlug, setBakeConfirmSlug] = useState<string | null>(null);
   const [baking, setBaking] = useState(false);
@@ -78,9 +78,12 @@ export function App() {
   });
   const [requestPanelHeight, setRequestPanelHeight] = useState<number | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(260);
-  const resizeDragRef = useRef<{ startY: number; startHeight: number } | null>(null);
-  const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const requestPanelRef = useRef<HTMLDivElement>(null);
+
+  /* derived helpers */
+  const flash = useFlash(setSuccessMessage);
+  const handleResizeMouseDown = useDragResize("y", setRequestPanelHeight, 60);
+  const handleSidebarResize = useDragResize("x", setSidebarWidth, 180, 600);
 
   /* data loading */
   async function loadRuntimeConfig() {
@@ -106,9 +109,7 @@ export function App() {
   async function loadRuns() {
     try {
       const response = await requestJson<RunSummary[]>("/api/runs");
-      setRuns((prev) =>
-        JSON.stringify(prev) === JSON.stringify(response) ? prev : response
-      );
+      setRuns((prev) => jsonEqual(prev, response) ? prev : response);
     } catch {
       // Silently ignore — polling will retry on the next tick.
     }
@@ -131,15 +132,9 @@ export function App() {
         ),
         requestJson<RunEvent[]>(`/api/runs/${runId}/events`),
       ]);
-      setRunDetail((prev) =>
-        JSON.stringify(prev) === JSON.stringify(detail) ? prev : detail
-      );
-      setItems((prev) =>
-        JSON.stringify(prev) === JSON.stringify(itemsRes) ? prev : itemsRes
-      );
-      setEvents((prev) =>
-        JSON.stringify(prev) === JSON.stringify(eventsRes) ? prev : eventsRes
-      );
+      setRunDetail((prev) => jsonEqual(prev, detail) ? prev : detail);
+      setItems((prev) => jsonEqual(prev, itemsRes) ? prev : itemsRes);
+      setEvents((prev) => jsonEqual(prev, eventsRes) ? prev : eventsRes);
       setError(null);
     } catch {
       // Silently ignore — polling will retry on the next tick.
@@ -560,8 +555,7 @@ export function App() {
       });
       setFormState((cur) => ({ ...cur, inputListId: created.id }));
       setNewInputListLabel("");
-      setSuccessMessage(`Saved "${created.label}" (${created.itemCount} items)`);
-      setTimeout(() => setSuccessMessage(null), 4000);
+      flash(`Saved "${created.label}" (${created.itemCount} items)`, 4000);
       await loadInputLists();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save input list");
@@ -597,8 +591,7 @@ export function App() {
         inputListId: created.id,
         idsRaw: formatInputListData(created.data),
       }));
-      setSuccessMessage(`Failures saved as "${created.label}"`);
-      setTimeout(() => setSuccessMessage(null), 4000);
+      flash(`Failures saved as "${created.label}"`, 4000);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save failures as a list");
     }
@@ -611,8 +604,7 @@ export function App() {
       if (formState.inputListId === id) {
         setFormState((cur) => ({ ...cur, inputListId: "" }));
       }
-      setSuccessMessage("Input list deleted.");
-      setTimeout(() => setSuccessMessage(null), 3000);
+      flash("Input list deleted.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete input list");
     }
@@ -625,8 +617,7 @@ export function App() {
       idsRaw: formatInputListData(il.data),
     }));
     setSidebarView("collections");
-    setSuccessMessage(`Loaded "${il.label}" (${il.itemCount} items)`);
-    setTimeout(() => setSuccessMessage(null), 3000);
+    flash(`Loaded "${il.label}" (${il.itemCount} items)`);
   }
 
   const postmanFileRef = useRef<HTMLInputElement>(null);
@@ -649,8 +640,7 @@ export function App() {
       // Reload runtime config to pick up the new module
       const cfg = await requestJson<RuntimeConfig>("/api/config");
       setRuntimeConfig(cfg);
-      setSuccessMessage(`Imported "${result.label}" with ${result.endpointCount} endpoints → ${result.filename}`);
-      setTimeout(() => setSuccessMessage(null), 5000);
+      flash(`Imported "${result.label}" with ${result.endpointCount} endpoints → ${result.filename}`, 5000);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to import Postman collection");
     }
@@ -680,26 +670,9 @@ export function App() {
   function handleReplayRun() {
     if (!runDetail) return;
     const cfg = runDetail.config;
-    const safeStr = (v: unknown) => typeof v === "string" ? v : "";
-    const safeNum = (v: unknown, fallback: number) => typeof v === "number" ? v : fallback;
-
-    const cfgHeaders = cfg.headers && typeof cfg.headers === "object" && !Array.isArray(cfg.headers)
-      ? cfg.headers as Record<string, string> : {};
-    const headerRows: QueryParamRow[] = Object.entries(cfgHeaders).length > 0
-      ? [...Object.entries(cfgHeaders).map(([key, value]) => ({ key, value })), { key: "", value: "" }]
-      : [{ key: "", value: "" }];
-
-    const cfgQp = cfg.queryParams && typeof cfg.queryParams === "object" && !Array.isArray(cfg.queryParams)
-      ? cfg.queryParams as Record<string, string> : {};
-    const qpRows: QueryParamRow[] = Object.entries(cfgQp).length > 0
-      ? [...Object.entries(cfgQp).map(([key, value]) => ({ key, value })), { key: "", value: "" }]
-      : [{ key: "", value: "" }];
-
-    const cfgFormBody = cfg.formBody && typeof cfg.formBody === "object" && !Array.isArray(cfg.formBody)
-      ? cfg.formBody as Record<string, string> : {};
-    const formRows: QueryParamRow[] = Object.entries(cfgFormBody).length > 0
-      ? [...Object.entries(cfgFormBody).map(([key, value]) => ({ key, value })), { key: "", value: "" }]
-      : [{ key: "", value: "" }];
+    const headerRows = recordToRows(cfg.headers);
+    const qpRows = recordToRows(cfg.queryParams);
+    const formRows = recordToRows(cfg.formBody);
 
     const ids = Array.isArray(cfg.itemValues) ? (cfg.itemValues as string[]).filter((v) => v !== "0") : [];
     const stopCodes = Array.isArray(cfg.stopOnHttpStatuses) ? (cfg.stopOnHttpStatuses as number[]).join(",") : "";
@@ -748,6 +721,7 @@ export function App() {
             const pinned = prev.filter((t) => t.pinned);
             return [...pinned, {
               id: tabId,
+              type: "endpoint" as const,
               endpointSlug: replayEndpointSlug,
               moduleSlug: replayModuleSlug,
               method: replayEp.method,
@@ -760,8 +734,7 @@ export function App() {
       }
     }
 
-    setSuccessMessage("Restored form from previous run config.");
-    setTimeout(() => setSuccessMessage(null), 3000);
+    flash("Restored form from previous run config.");
   }
 
   function handleCopyAsCliCommand() {
@@ -773,8 +746,7 @@ export function App() {
     if (formState.targetEnvironment !== "staging") parts.push(`--env ${formState.targetEnvironment}`);
     if (formState.concurrency > 1) parts.push(`--concurrency ${formState.concurrency}`);
     void navigator.clipboard.writeText(parts.join(" "));
-    setSuccessMessage("CLI command copied to clipboard.");
-    setTimeout(() => setSuccessMessage(null), 3000);
+    flash("CLI command copied to clipboard.");
   }
 
   function formatItemDuration(item: RunItem): string | null {
@@ -784,51 +756,13 @@ export function App() {
     return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
   }
 
-  function exportAsPostman(mod: ModuleCatalog) {
-    const baseUrl = mod.environments[formState.targetEnvironment]?.baseUrl ?? "";
-    const collection = {
-      info: {
-        name: mod.label,
-        description: mod.description ?? "",
-        schema: "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-      },
-      item: mod.endpoints.map((ep) => ({
-        name: ep.label,
-        request: {
-          method: ep.method,
-          description: ep.description,
-          header: [] as unknown[],
-          url: {
-            raw: `{{baseUrl}}${ep.pathTemplate}`,
-            host: ["{{baseUrl}}"],
-            path: ep.pathTemplate.replace(/^\//, "").split("/"),
-          },
-          body: ["POST", "PUT", "PATCH"].includes(ep.method)
-            ? {
-                mode: "raw",
-                raw: ep.defaultRunConfig?.requestBody
-                  ? JSON.stringify(ep.defaultRunConfig.requestBody, null, 2)
-                  : "{}",
-                options: { raw: { language: "json" } },
-              }
-            : undefined,
-        },
-      })),
-      variable: [{ key: "baseUrl", value: baseUrl, type: "string" }],
-    };
-    const blob = new Blob([JSON.stringify(collection, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${mod.slug}-collection.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+  function handleExportAsPostman(mod: ModuleCatalog) {
+    exportAsPostman(mod, formState.targetEnvironment);
   }
 
   function handleCopyPathTemplate(ep: ModuleEndpointCatalog) {
     void navigator.clipboard.writeText(ep.pathTemplate);
-    setSuccessMessage(`Copied: ${ep.pathTemplate}`);
-    setTimeout(() => setSuccessMessage(null), 3000);
+    flash(`Copied: ${ep.pathTemplate}`);
     setContextMenuEndpoint(null);
   }
 
@@ -922,57 +856,17 @@ export function App() {
       setAddRequestName("");
       setAddRequestMethod("GET");
       setAddRequestPath("");
-      setSuccessMessage("Request added.");
-      setTimeout(() => setSuccessMessage(null), 3000);
+      flash("Request added.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create request");
     }
   }
 
-  // Close context menu on outside click
-  useEffect(() => {
-    if (!contextMenuEndpoint) return;
-    const handler = () => setContextMenuEndpoint(null);
-    window.addEventListener("click", handler);
-    return () => window.removeEventListener("click", handler);
-  }, [contextMenuEndpoint]);
-
-  // Close module menu on outside click (deferred so the opening click doesn't race)
-  useEffect(() => {
-    if (!moduleMenu) return;
-    let cleanup = () => { /* noop */ };
-    const raf = requestAnimationFrame(() => {
-      const handler = (e: MouseEvent) => {
-        const target = e.target as HTMLElement | null;
-        if (target?.closest?.(".module-context-menu")) return;
-        setModuleMenu(null);
-      };
-      window.addEventListener("click", handler);
-      cleanup = () => window.removeEventListener("click", handler);
-    });
-    return () => {
-      cancelAnimationFrame(raf);
-      cleanup();
-    };
-  }, [moduleMenu]);
-
-  // Close folder context menu on outside click
-  useEffect(() => {
-    if (!folderContextMenu) return;
-    const handler = () => setFolderContextMenu(null);
-    requestAnimationFrame(() => {
-      window.addEventListener("click", handler);
-    });
-    return () => window.removeEventListener("click", handler);
-  }, [folderContextMenu]);
-
-  // Close multi-select menu on outside click
-  useEffect(() => {
-    if (!multiSelectMenu) return;
-    const handler = () => setMultiSelectMenu(null);
-    window.addEventListener("click", handler);
-    return () => window.removeEventListener("click", handler);
-  }, [multiSelectMenu]);
+  // Close context menus on outside click
+  useClickOutside(contextMenuEndpoint, () => setContextMenuEndpoint(null));
+  useClickOutside(moduleMenu, () => setModuleMenu(null), ".module-context-menu");
+  useClickOutside(folderContextMenu, () => setFolderContextMenu(null));
+  useClickOutside(multiSelectMenu, () => setMultiSelectMenu(null));
 
   async function openModuleConfigEditor(slug: string) {
     setModuleMenu(null);
@@ -1029,8 +923,7 @@ export function App() {
       // reload runtime config to refresh sidebar
       const cfg = await requestJson<RuntimeConfig>("/api/config");
       setRuntimeConfig(cfg);
-      setSuccessMessage("Module config saved.");
-      setTimeout(() => setSuccessMessage(null), 3000);
+      flash("Module config saved.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save module config");
     } finally {
@@ -1055,8 +948,7 @@ export function App() {
           }));
         } catch { /* ignore refresh failure */ }
       }
-      setSuccessMessage("Overrides baked into .ts file. Backup created.");
-      setTimeout(() => setSuccessMessage(null), 5000);
+      flash("Overrides baked into .ts file. Backup created.", 5000);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to rewrite module file");
     } finally {
@@ -1064,44 +956,8 @@ export function App() {
     }
   }
 
-  // Close send menu on outside click
-  useEffect(() => {
-    if (!sendMenuOpen) return;
-    const handler = () => setSendMenuOpen(false);
-    window.addEventListener("click", handler);
-    return () => window.removeEventListener("click", handler);
-  }, [sendMenuOpen]);
+  useClickOutside(sendMenuOpen || null, () => setSendMenuOpen(false));
 
-  // Resize handle drag
-  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const panel = requestPanelRef.current;
-    if (!panel) return;
-    resizeDragRef.current = { startY: e.clientY, startHeight: panel.getBoundingClientRect().height };
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!resizeDragRef.current) return;
-      const delta = ev.clientY - resizeDragRef.current.startY;
-      const newHeight = Math.max(60, resizeDragRef.current.startHeight + delta);
-      setRequestPanelHeight(newHeight);
-    };
-    const onMouseUp = () => {
-      resizeDragRef.current = null;
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.body.style.cursor = "row-resize";
-    document.body.style.userSelect = "none";
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  }, []);
-
-  function flashCopied(msg = "Copied!") {
-    setSuccessMessage(msg);
-    setTimeout(() => setSuccessMessage(null), 2000);
-  }
 
   /* ── Render ────────────────────────────────────────────────────── */
   return (
@@ -1109,67 +965,26 @@ export function App() {
       {/* ── Icon Rail (far left) ──────────────────────────────────── */}
       <div className="icon-rail">
         <button className={`rail-btn ${sidebarView === "collections" ? "active" : ""}`} type="button" title="Collections" onClick={() => setSidebarView("collections")}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-          </svg>
+          <FolderIcon />
         </button>
         <button className={`rail-btn ${sidebarView === "history" ? "active" : ""}`} type="button" title="History" onClick={() => { setSidebarView("history"); void loadRuns(); }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <polyline points="12 6 12 12 16 14" />
-          </svg>
+          <ClockIcon />
         </button>
         <button className={`rail-btn ${sidebarView === "input-lists" ? "active" : ""}`} type="button" title="Input Lists" onClick={() => { setSidebarView("input-lists"); void loadInputLists(); }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="8" y1="6" x2="21" y2="6" />
-            <line x1="8" y1="12" x2="21" y2="12" />
-            <line x1="8" y1="18" x2="21" y2="18" />
-            <line x1="3" y1="6" x2="3.01" y2="6" />
-            <line x1="3" y1="12" x2="3.01" y2="12" />
-            <line x1="3" y1="18" x2="3.01" y2="18" />
-          </svg>
+          <ListIcon />
         </button>
         <button className={`rail-btn ${sidebarView === "env" ? "active" : ""}`} type="button" title="Environment Variables" onClick={() => setSidebarView("env")}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="2" />
-            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-          </svg>
+          <SunIcon />
         </button>
         <div className="rail-spacer" />
         <button className={`rail-btn ${sidebarView === "settings" ? "active" : ""}`} type="button" title="Settings" onClick={() => setSidebarView("settings")}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </svg>
+          <GearIcon />
         </button>
       </div>
 
       {/* ── Sidebar ────────────────────────────────────────────────── */}
       <div className="sidebar" style={{ width: sidebarWidth }}>
-        <div
-          className="sidebar-resize-handle"
-          onMouseDown={(e) => {
-            e.preventDefault();
-            sidebarDragRef.current = { startX: e.clientX, startWidth: sidebarWidth };
-            const onMove = (ev: MouseEvent) => {
-              if (!sidebarDragRef.current) return;
-              const delta = ev.clientX - sidebarDragRef.current.startX;
-              const next = Math.max(180, Math.min(600, sidebarDragRef.current.startWidth + delta));
-              setSidebarWidth(next);
-            };
-            const onUp = () => {
-              sidebarDragRef.current = null;
-              document.removeEventListener("mousemove", onMove);
-              document.removeEventListener("mouseup", onUp);
-              document.body.style.cursor = "";
-              document.body.style.userSelect = "";
-            };
-            document.addEventListener("mousemove", onMove);
-            document.addEventListener("mouseup", onUp);
-            document.body.style.cursor = "col-resize";
-            document.body.style.userSelect = "none";
-          }}
-        />
+        <div className="sidebar-resize-handle" onMouseDown={handleSidebarResize} />
         {sidebarView === "collections" ? (
           <>
             <div className="sidebar-header">
@@ -1190,7 +1005,7 @@ export function App() {
                   <button
                     className="sidebar-action-btn"
                     type="button"
-                    onClick={() => exportAsPostman(selectedModule)}
+                    onClick={() => handleExportAsPostman(selectedModule)}
                   >Export</button>
                 ) : null}
                 <button
@@ -1203,10 +1018,7 @@ export function App() {
 
             <div className="sidebar-search">
               <span className="sidebar-search-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="11" cy="11" r="8" />
-                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
-                </svg>
+                <SearchIcon />
               </span>
               <input
                 placeholder="Filter endpoints..."
@@ -1222,61 +1034,6 @@ export function App() {
                 if (navSearch && (!modTree || countTreeEndpoints(modTree) === 0)) return null;
                 const activeTab = tabs.find((t) => t.id === activeTabId);
                 const isSelected = formState.moduleSlug === mod.slug || (activeTab?.type === "module-config" && activeTab.moduleSlug === mod.slug);
-
-                function renderFolderNode(node: NavFolderNode, depth: number): React.ReactNode {
-                  const isOpen = openFolders.has(node.key);
-                  const totalCount = countTreeEndpoints(node);
-                  // Derive folder path from node.key: "modSlug/a/b" → ["a","b"]
-                  const folderPath = node.key.split("/").slice(1);
-                  return (
-                    <div className="tree-folder" key={node.key} style={{ "--folder-depth": depth } as React.CSSProperties}>
-                      <button
-                        className="tree-folder-header"
-                        onClick={() => toggleFolder(node.key)}
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          setFolderContextMenu({ moduleSlug: mod.slug, folderPath, x: e.clientX, y: e.clientY });
-                        }}
-                        type="button"
-                      >
-                        <span className={`tree-chevron ${isOpen ? "open" : ""}`}>&#9654;</span>
-                        <span className="tree-folder-icon">&#128194;</span>
-                        <span>{node.name}</span>
-                        <span className="tree-folder-count">{totalCount}</span>
-                      </button>
-                      {isOpen ? (
-                        <>
-                          {node.children.map((child) => renderFolderNode(child, depth + 1))}
-                          {node.endpoints.map((ep) => (
-                            <button
-                              className={`tree-item ${selectedEndpoints.has(ep.slug) ? "multi-selected" : ""} ${activeTab?.type !== "module-config" && formState.moduleSlug === mod.slug && formState.endpointSlug === ep.slug ? "active" : ""}`}
-                              key={ep.slug}
-                              onClick={(e) => handleEndpointClick(ep, mod, e)}
-                              onContextMenu={(e) => handleEndpointContextMenu(ep, mod, e)}
-                              style={{ "--folder-depth": depth + 1 } as React.CSSProperties}
-                              type="button"
-                            >
-                              <span className={`tree-item-method ${ep.method.toLowerCase()}`}>
-                                {ep.method}
-                              </span>
-                              <span className="tree-item-label">{ep.label}</span>
-                              <span className="tree-item-actions">
-                                <span
-                                  className="tree-item-action"
-                                  title="More actions"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setContextMenuEndpoint({ slug: ep.slug, x: e.clientX, y: e.clientY });
-                                  }}
-                                >&hellip;</span>
-                              </span>
-                            </button>
-                          ))}
-                        </>
-                      ) : null}
-                    </div>
-                  );
-                }
 
                 return (
                   <div className="tree-collection" key={mod.slug}>
@@ -1320,7 +1077,23 @@ export function App() {
                     </div>
 
                     {modOpen && modTree
-                      ? modTree.children.map((child) => renderFolderNode(child, 1))
+                      ? modTree.children.map((child) => (
+                          <FolderNode
+                            key={child.key}
+                            node={child}
+                            depth={1}
+                            mod={mod}
+                            openFolders={openFolders}
+                            toggleFolder={toggleFolder}
+                            activeTab={activeTab}
+                            formState={formState}
+                            selectedEndpoints={selectedEndpoints}
+                            handleEndpointClick={handleEndpointClick}
+                            handleEndpointContextMenu={handleEndpointContextMenu}
+                            setContextMenuEndpoint={setContextMenuEndpoint}
+                            setFolderContextMenu={setFolderContextMenu}
+                          />
+                        ))
                       : null}
                   </div>
                 );
@@ -1396,8 +1169,7 @@ export function App() {
                           type="button"
                           onClick={() => {
                             void navigator.clipboard.writeText(formatInputListData(il.data));
-                            setSuccessMessage(`Copied ${il.itemCount} IDs.`);
-                            setTimeout(() => setSuccessMessage(null), 3000);
+                            flash(`Copied ${il.itemCount} IDs.`);
                           }}
                         >
                           Copy
@@ -1497,8 +1269,7 @@ export function App() {
             <button type="button" onClick={() => handleCopyPathTemplate(ep)}>Copy path template</button>
             <button type="button" onClick={() => {
               void navigator.clipboard.writeText(`${selectedModule.environments[formState.targetEnvironment]?.baseUrl ?? ""}${ep.pathTemplate}`);
-              setSuccessMessage("Full URL copied.");
-              setTimeout(() => setSuccessMessage(null), 3000);
+              flash("Full URL copied.");
               setContextMenuEndpoint(null);
             }}>Copy full URL</button>
           </div>
@@ -1515,7 +1286,7 @@ export function App() {
             <button type="button" onClick={() => { setAddFolderDialog({ moduleSlug: mod.slug, parentFolderPath: [] }); setModuleMenu(null); }}>Add folder</button>
             <div className="context-menu-divider" />
             <button type="button" onClick={() => void openModuleConfigEditor(mod.slug)}>Edit Config</button>
-            <button type="button" onClick={() => { exportAsPostman(mod); setModuleMenu(null); }}>Export as Postman</button>
+            <button type="button" onClick={() => { handleExportAsPostman(mod); setModuleMenu(null); }}>Export as Postman</button>
             <button type="button" onClick={() => { setBakeConfirmSlug(mod.slug); setModuleMenu(null); }}>Rewrite Module File</button>
           </div>
         );
@@ -1548,8 +1319,7 @@ export function App() {
             const eps = (selectedModule?.endpoints ?? []).filter((e) => selectedEndpoints.has(e.slug));
             const text = eps.map((e) => `${e.method} ${e.pathTemplate}`).join("\n");
             void navigator.clipboard.writeText(text);
-            setSuccessMessage(`Copied ${eps.length} paths.`);
-            setTimeout(() => setSuccessMessage(null), 3000);
+            flash(`Copied ${eps.length} paths.`);
             setMultiSelectMenu(null);
             setSelectedEndpoints(new Set());
           }}>Copy {selectedEndpoints.size} paths</button>
@@ -1712,385 +1482,15 @@ export function App() {
           const cfgSlug = aTab.moduleSlug;
           const cfgState = moduleConfigDrafts[cfgSlug];
           if (!cfgState) return null;
-          const { module: mod, draft, activeSection } = cfgState;
-
-          const getField = <T,>(path: string, fallback: T): T => {
-            const parts = path.split(".");
-            let cursor: unknown = draft;
-            for (const p of parts) {
-              if (cursor && typeof cursor === "object" && p in (cursor as Record<string, unknown>)) {
-                cursor = (cursor as Record<string, unknown>)[p];
-              } else { cursor = undefined; break; }
-            }
-            if (cursor !== undefined) return cursor as T;
-            let baseCursor: unknown = mod;
-            for (const p of parts) {
-              if (baseCursor && typeof baseCursor === "object" && p in (baseCursor as Record<string, unknown>)) {
-                baseCursor = (baseCursor as Record<string, unknown>)[p];
-              } else return fallback;
-            }
-            return (baseCursor ?? fallback) as T;
-          };
-
-          const setField = (path: string, value: unknown) => {
-            const parts = path.split(".");
-            setModuleConfigDrafts((prev) => {
-              const entry = prev[cfgSlug];
-              if (!entry) return prev;
-              const newDraft = JSON.parse(JSON.stringify(entry.draft)) as Record<string, unknown>;
-              let cursor = newDraft;
-              for (let i = 0; i < parts.length - 1; i++) {
-                if (!(parts[i] in cursor) || typeof cursor[parts[i]] !== "object") cursor[parts[i]] = {};
-                cursor = cursor[parts[i]] as Record<string, unknown>;
-              }
-              cursor[parts[parts.length - 1]] = value;
-              return { ...prev, [cfgSlug]: { ...entry, draft: newDraft } };
-            });
-          };
-
-          const setSection = (s: string) => {
-            setModuleConfigDrafts((prev) => {
-              const entry = prev[cfgSlug];
-              if (!entry) return prev;
-              return { ...prev, [cfgSlug]: { ...entry, activeSection: s } };
-            });
-          };
-
-          const authMode = getField<string>("auth.mode", mod.auth?.mode ?? "jwt");
-
-          const sections = [
-            { key: "general", label: "General", icon: "\u2699" },
-            { key: "environments", label: "Environments", icon: "\uD83C\uDF10" },
-            { key: "auth", label: "Authorization", icon: "\uD83D\uDD12" },
-            { key: "headers", label: "Headers", icon: "\u2630" },
-            { key: "variables", label: "Variables", icon: "{ }" },
-          ];
-
           return (
-            <div className="entity-editor">
-              {/* Entity header */}
-              <div className="entity-header">
-                <div className="entity-title-row">
-                  <span className="entity-icon">{"\uD83D\uDCC1"}</span>
-                  <div className="entity-title-group">
-                    <h2 className="entity-title">{getField("label", mod.label)}</h2>
-                    <span className="entity-subtitle">{getField("serviceName", mod.serviceName)} &middot; {mod.endpoints.length} endpoints</span>
-                  </div>
-                  <div className="entity-actions">
-                    <button
-                      type="button"
-                      className="primary-button"
-                      disabled={moduleConfigSaving}
-                      onClick={() => void saveModuleConfig(cfgSlug)}
-                    >{moduleConfigSaving ? "Saving\u2026" : "Save"}</button>
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      onClick={() => { setBakeConfirmSlug(cfgSlug); }}
-                    >Bake to .ts</button>
-                  </div>
-                </div>
-                {/* Section tabs */}
-                <div className="entity-section-tabs">
-                  {sections.map((s) => (
-                    <button
-                      key={s.key}
-                      type="button"
-                      className={`entity-section-tab ${activeSection === s.key ? "active" : ""}`}
-                      onClick={() => setSection(s.key)}
-                    >{s.label}</button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Section content */}
-              <div className="entity-body">
-                {activeSection === "general" ? (
-                  <div className="entity-section">
-                    <div className="entity-card">
-                      <h3 className="entity-card-title">Identity</h3>
-                      <div className="entity-field-grid">
-                        <label className="entity-field">
-                          <span className="entity-field-label">Label</span>
-                          <input value={getField("label", mod.label)} onChange={(e) => setField("label", e.target.value)} />
-                        </label>
-                        <label className="entity-field">
-                          <span className="entity-field-label">Service Name</span>
-                          <input value={getField("serviceName", mod.serviceName)} onChange={(e) => setField("serviceName", e.target.value)} />
-                        </label>
-                      </div>
-                      <label className="entity-field">
-                        <span className="entity-field-label">Description</span>
-                        <textarea rows={3} value={getField("description", mod.description ?? "")} onChange={(e) => setField("description", e.target.value)} />
-                      </label>
-                    </div>
-                    <div className="entity-card">
-                      <h3 className="entity-card-title">Defaults</h3>
-                      <label className="entity-field" style={{ maxWidth: 260 }}>
-                        <span className="entity-field-label">Default Environment</span>
-                        <select value={getField("defaultTargetEnvironment", mod.defaultTargetEnvironment)} onChange={(e) => setField("defaultTargetEnvironment", e.target.value)}>
-                          {(() => {
-                            const envs = getField<Record<string, { baseUrl: string }>>("environments", mod.environments ?? {});
-                            const keys = Object.keys(envs);
-                            if (keys.length === 0) keys.push("staging", "prod");
-                            return keys.map((k) => <option key={k} value={k}>{k}</option>);
-                          })()}
-                        </select>
-                      </label>
-                    </div>
-                  </div>
-                ) : activeSection === "environments" ? (
-                  <div className="entity-section">
-                    <div className="entity-card">
-                      <h3 className="entity-card-title">Environments</h3>
-                      <p className="entity-hint">Base URLs per target environment. These are used to resolve request paths.</p>
-                      <div className="entity-table">
-                        <div className="entity-table-header">
-                          <span className="entity-table-cell env-name-col">Name</span>
-                          <span className="entity-table-cell env-url-col">Base URL</span>
-                          <span className="entity-table-cell entity-table-action-col"></span>
-                        </div>
-                        {(() => {
-                          const envs = getField<Record<string, { baseUrl: string }>>("environments", mod.environments ?? {});
-                          return Object.entries(envs).map(([envKey, envVal]) => (
-                            <div key={envKey} className="entity-table-row">
-                              <span className="entity-table-cell env-name-col">
-                                <input
-                                  value={envKey}
-                                  onChange={(e) => {
-                                    const newEnvs = { ...envs };
-                                    delete newEnvs[envKey];
-                                    newEnvs[e.target.value] = envVal;
-                                    setField("environments", newEnvs);
-                                  }}
-                                  placeholder="environment"
-                                />
-                              </span>
-                              <span className="entity-table-cell env-url-col">
-                                <input
-                                  value={envVal?.baseUrl ?? ""}
-                                  onChange={(e) => setField(`environments.${envKey}.baseUrl`, e.target.value)}
-                                  placeholder="https://service.example.com"
-                                />
-                              </span>
-                              <span className="entity-table-cell entity-table-action-col">
-                                <button type="button" className="remove-row-btn" onClick={() => {
-                                  const newEnvs = { ...envs };
-                                  delete newEnvs[envKey];
-                                  setField("environments", newEnvs);
-                                }} title="Remove">&times;</button>
-                              </span>
-                            </div>
-                          ));
-                        })()}
-                      </div>
-                      <button type="button" className="ghost-button" style={{ marginTop: 8 }} onClick={() => {
-                        const envs = getField<Record<string, { baseUrl: string }>>("environments", mod.environments ?? {});
-                        setField("environments", { ...envs, "": { baseUrl: "" } });
-                      }}>+ Add environment</button>
-                    </div>
-                  </div>
-                ) : activeSection === "auth" ? (
-                  <div className="entity-section">
-                    <div className="entity-card">
-                      <h3 className="entity-card-title">Authorization</h3>
-                      <label className="entity-field" style={{ maxWidth: 260 }}>
-                        <span className="entity-field-label">Auth Mode</span>
-                        <select value={authMode} onChange={(e) => setField("auth.mode", e.target.value)}>
-                          <option value="jwt">JWT</option>
-                          <option value="apikey">API Key</option>
-                          <option value="bearer">Bearer Token</option>
-                          <option value="none">None</option>
-                        </select>
-                      </label>
-                    </div>
-                    {authMode === "jwt" ? (
-                      <div className="entity-card">
-                        <h3 className="entity-card-title">JWT Configuration</h3>
-                        <div className="entity-field-grid">
-                          <label className="entity-field">
-                            <span className="entity-field-label">Secret Env Var</span>
-                            <input value={getField("auth.secretEnvVar", mod.auth?.secretEnvVar ?? "")} onChange={(e) => setField("auth.secretEnvVar", e.target.value)} placeholder="MY_SERVICE_JWT_SECRET" />
-                          </label>
-                          <label className="entity-field">
-                            <span className="entity-field-label">Email</span>
-                            <input value={getField("auth.jwt.email", mod.auth?.jwt?.email ?? "")} onChange={(e) => setField("auth.jwt.email", e.target.value)} />
-                          </label>
-                          <label className="entity-field">
-                            <span className="entity-field-label">Subject</span>
-                            <input value={getField("auth.jwt.subject", "") as string} onChange={(e) => setField("auth.jwt.subject", e.target.value || undefined)} placeholder="(optional)" />
-                          </label>
-                          <label className="entity-field">
-                            <span className="entity-field-label">Issuer</span>
-                            <input value={getField("auth.jwt.issuer", "") as string} onChange={(e) => setField("auth.jwt.issuer", e.target.value || undefined)} placeholder="(optional)" />
-                          </label>
-                          <label className="entity-field">
-                            <span className="entity-field-label">Audience</span>
-                            <input value={getField("auth.jwt.audience", "") as string} onChange={(e) => setField("auth.jwt.audience", e.target.value || undefined)} placeholder="(optional)" />
-                          </label>
-                        </div>
-                        <label className="entity-field" style={{ maxWidth: 200 }}>
-                          <span className="entity-field-label">Expires In (seconds)</span>
-                          <input type="number" value={getField("auth.jwt.expiresInSeconds", 300)} onChange={(e) => setField("auth.jwt.expiresInSeconds", Number(e.target.value))} />
-                        </label>
-                      </div>
-                    ) : authMode === "apikey" ? (
-                      <div className="entity-card">
-                        <h3 className="entity-card-title">API Key Configuration</h3>
-                        <div className="entity-field-grid">
-                          <label className="entity-field">
-                            <span className="entity-field-label">Header Name</span>
-                            <input value={getField("auth.apikey.headerName", mod.auth?.apikey?.headerName ?? "")} onChange={(e) => setField("auth.apikey.headerName", e.target.value)} placeholder="x-api-key" />
-                          </label>
-                          <label className="entity-field">
-                            <span className="entity-field-label">Value Env Var</span>
-                            <input value={getField("auth.apikey.valueEnvVar", mod.auth?.apikey?.valueEnvVar ?? "")} onChange={(e) => setField("auth.apikey.valueEnvVar", e.target.value)} placeholder="MY_SERVICE_API_KEY" />
-                          </label>
-                        </div>
-                      </div>
-                    ) : authMode === "bearer" ? (
-                      <div className="entity-card">
-                        <h3 className="entity-card-title">Bearer Token Configuration</h3>
-                        <label className="entity-field">
-                          <span className="entity-field-label">Token Env Var</span>
-                          <input value={getField("auth.bearer.tokenEnvVar", mod.auth?.bearer?.tokenEnvVar ?? "")} onChange={(e) => setField("auth.bearer.tokenEnvVar", e.target.value)} placeholder="MY_SERVICE_BEARER_TOKEN" />
-                        </label>
-                      </div>
-                    ) : (
-                      <div className="entity-card">
-                        <p className="entity-hint">No authentication is configured for this module.</p>
-                      </div>
-                    )}
-                  </div>
-                ) : activeSection === "headers" ? (
-                  <div className="entity-section">
-                    <div className="entity-card">
-                      <h3 className="entity-card-title">Default Headers</h3>
-                      <p className="entity-hint">These headers are automatically included in every request for this module.</p>
-                      {(() => {
-                        const headers = getField<Record<string, string>>("defaultHeaders", mod.defaultHeaders ?? {});
-                        const entries = Object.entries(headers);
-
-                        return entries.length === 0 ? (
-                          <div className="default-headers-prompt">
-                            <p className="entity-hint" style={{ margin: 0 }}>No default headers configured.</p>
-                            <button
-                              type="button"
-                              className="ghost-button"
-                              onClick={() =>
-                                setField("defaultHeaders", {
-                                  "Cache-Control": "no-cache",
-                                  "User-Agent": "RepoApiWrapper/1.0",
-                                  "Accept": "*/*",
-                                  "Accept-Encoding": "gzip, deflate, br",
-                                  "Connection": "keep-alive",
-                                })
-                              }
-                            >
-                              Add default headers
-                            </button>
-                          </div>
-                        ) : (
-                          <>
-                            <div className="entity-table">
-                              <div className="entity-table-header">
-                                <span className="entity-table-cell" style={{ flex: 1 }}>Key</span>
-                                <span className="entity-table-cell" style={{ flex: 2 }}>Value</span>
-                                <span className="entity-table-cell entity-table-action-col"></span>
-                              </div>
-                              {entries.map(([key, value], i) => (
-                                <div key={i} className="entity-table-row">
-                                  <span className="entity-table-cell" style={{ flex: 1 }}>
-                                    <input value={key} onChange={(e) => {
-                                      const newH = { ...headers };
-                                      delete newH[key];
-                                      newH[e.target.value] = value;
-                                      setField("defaultHeaders", newH);
-                                    }} placeholder="Header name" />
-                                  </span>
-                                  <span className="entity-table-cell" style={{ flex: 2 }}>
-                                    <input value={value} onChange={(e) => setField("defaultHeaders", { ...headers, [key]: e.target.value })} placeholder="Value" />
-                                  </span>
-                                  <span className="entity-table-cell entity-table-action-col">
-                                    <button type="button" className="remove-row-btn" onClick={() => {
-                                      const newH = { ...headers };
-                                      delete newH[key];
-                                      setField("defaultHeaders", newH);
-                                    }} title="Remove">&times;</button>
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                            <button type="button" className="ghost-button" style={{ marginTop: 8 }} onClick={() => {
-                              setField("defaultHeaders", { ...headers, "": "" });
-                            }}>+ Add header</button>
-                          </>
-                        );
-                      })()}
-                    </div>
-                  </div>
-                ) : activeSection === "variables" ? (
-                  <div className="entity-section">
-                    <div className="entity-card">
-                      <h3 className="entity-card-title">Collection Variables</h3>
-                      <p className="entity-hint">Module-level variables that can be referenced as <code>{"{{varName}}"}</code> in URLs, headers, query params, and request bodies. Sidebar environment variables override these.</p>
-                      {(() => {
-                        const vars = getField<Record<string, string>>("variables", mod.variables ?? {});
-                        const entries = Object.entries(vars);
-
-                        return entries.length === 0 ? (
-                          <div className="default-headers-prompt">
-                            <p className="entity-hint" style={{ margin: 0 }}>No variables configured yet.</p>
-                            <button
-                              type="button"
-                              className="ghost-button"
-                              onClick={() => setField("variables", { "": "" })}
-                            >
-                              + Add variable
-                            </button>
-                          </div>
-                        ) : (
-                          <>
-                            <div className="entity-table">
-                              <div className="entity-table-header">
-                                <span className="entity-table-cell" style={{ flex: 1 }}>Name</span>
-                                <span className="entity-table-cell" style={{ flex: 2 }}>Value</span>
-                                <span className="entity-table-cell entity-table-action-col"></span>
-                              </div>
-                              {entries.map(([key, value], i) => (
-                                <div key={i} className="entity-table-row">
-                                  <span className="entity-table-cell" style={{ flex: 1 }}>
-                                    <input value={key} onChange={(e) => {
-                                      const newV = { ...vars };
-                                      delete newV[key];
-                                      newV[e.target.value] = value;
-                                      setField("variables", newV);
-                                    }} placeholder="Variable name" />
-                                  </span>
-                                  <span className="entity-table-cell" style={{ flex: 2 }}>
-                                    <input value={value} onChange={(e) => setField("variables", { ...vars, [key]: e.target.value })} placeholder="Value" />
-                                  </span>
-                                  <span className="entity-table-cell entity-table-action-col">
-                                    <button type="button" className="remove-row-btn" onClick={() => {
-                                      const newV = { ...vars };
-                                      delete newV[key];
-                                      setField("variables", newV);
-                                    }} title="Remove">&times;</button>
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                            <button type="button" className="ghost-button" style={{ marginTop: 8 }} onClick={() => {
-                              setField("variables", { ...vars, "": "" });
-                            }}>+ Add variable</button>
-                          </>
-                        );
-                      })()}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            </div>
+            <ModuleConfigEditor
+              slug={cfgSlug}
+              cfgState={cfgState}
+              saving={moduleConfigSaving}
+              onDraftsChange={setModuleConfigDrafts}
+              onSave={(s) => void saveModuleConfig(s)}
+              onBake={setBakeConfirmSlug}
+            />
           );
         })()}
 
@@ -2114,7 +1514,7 @@ export function App() {
                 {selectedModule?.environments[formState.targetEnvironment]?.baseUrl ? (
                   <span
                     className="url-base-prefix"
-                    onClick={() => { void navigator.clipboard.writeText(previewUrl); flashCopied("URL copied!"); }}
+                    onClick={() => { void navigator.clipboard.writeText(previewUrl); flash("URL copied!"); }}
                     title="Click to copy full URL"
                   >
                     {selectedModule.environments[formState.targetEnvironment].baseUrl}
@@ -2283,83 +1683,12 @@ export function App() {
               {workspaceTab === "headers" ? (
                 <div className="params-content">
                   {/* ── Inherited & auth headers ─────────────────────────── */}
-                  {(() => {
-                    const inherited: Array<{ key: string; displayValue: string; source: string; isAuth: boolean }> = [];
-
-                    if (selectedModule?.auth) {
-                      const auth = selectedModule.auth;
-                      if (auth.mode === "jwt") {
-                        inherited.push({ key: "authorization", displayValue: "Bearer ••••••••", source: "Auth (JWT)", isAuth: true });
-                      } else if (auth.mode === "apikey" && auth.apikey) {
-                        inherited.push({ key: auth.apikey.headerName, displayValue: `••••••••  (${auth.apikey.valueEnvVar})`, source: "Auth (API Key)", isAuth: true });
-                      } else if (auth.mode === "bearer") {
-                        inherited.push({ key: "authorization", displayValue: "Bearer ••••••••", source: "Auth (Bearer)", isAuth: true });
-                      }
-                    }
-
-                    if (selectedModule?.defaultHeaders) {
-                      for (const [key, value] of Object.entries(selectedModule.defaultHeaders)) {
-                        if (!inherited.some((h) => h.key.toLowerCase() === key.toLowerCase())) {
-                          inherited.push({ key, displayValue: value, source: selectedModule.label, isAuth: false });
-                        }
-                      }
-                    }
-
-                    const epCfgHeaders =
-                      selectedEndpoint?.defaultRunConfig?.headers &&
-                      typeof selectedEndpoint.defaultRunConfig.headers === "object" &&
-                      !Array.isArray(selectedEndpoint.defaultRunConfig.headers)
-                        ? (selectedEndpoint.defaultRunConfig.headers as Record<string, string>)
-                        : null;
-                    const epDefHeaders = selectedEndpoint?.defaultHeaders ?? epCfgHeaders;
-                    if (epDefHeaders) {
-                      for (const [key, value] of Object.entries(epDefHeaders)) {
-                        if (!inherited.some((h) => h.key.toLowerCase() === key.toLowerCase())) {
-                          inherited.push({ key, displayValue: value, source: selectedEndpoint.label, isAuth: false });
-                        }
-                      }
-                    }
-
-                    if (inherited.length === 0) return null;
-
-                    return (
-                      <div className="query-params-section">
-                        <span className="section-label">Inherited headers <span className="section-label-hint">Auto-included — uncheck to disable</span></span>
-                        <div className="query-params-table">
-                          {inherited.map((h) => {
-                            const isDisabled = h.isAuth
-                              ? formState.skipAuth
-                              : formState.disabledDefaultHeaders.includes(h.key);
-                            return (
-                              <div key={`${h.isAuth ? "auth:" : ""}${h.key}`} className={`query-param-row collection-header-row${isDisabled ? " inherited-disabled" : ""}`}>
-                                <label className="header-toggle-wrap">
-                                  <input
-                                    type="checkbox"
-                                    checked={!isDisabled}
-                                    onChange={() => {
-                                      if (h.isAuth) {
-                                        setFormState((cur) => ({ ...cur, skipAuth: !cur.skipAuth }));
-                                      } else {
-                                        setFormState((cur) => ({
-                                          ...cur,
-                                          disabledDefaultHeaders: isDisabled
-                                            ? cur.disabledDefaultHeaders.filter((k) => k !== h.key)
-                                            : [...cur.disabledDefaultHeaders, h.key],
-                                        }));
-                                      }
-                                    }}
-                                  />
-                                </label>
-                                <input className="query-param-key" value={h.key} readOnly tabIndex={-1} />
-                                <input className="query-param-value" value={h.displayValue} readOnly tabIndex={-1} />
-                                <span className="inherited-source">{h.source}</span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    );
-                  })()}
+                  <InheritedHeaders
+                    selectedModule={selectedModule}
+                    selectedEndpoint={selectedEndpoint}
+                    formState={formState}
+                    setFormState={setFormState}
+                  />
 
                   <div className="query-params-section">
                     <span className="section-label">Request headers <span className="section-label-hint">Use <code>{"{{itemValue}}"}</code> to inject the current item</span></span>
@@ -2863,10 +2192,7 @@ export function App() {
                                             void navigator.clipboard.writeText(text);
                                           }}
                                         >
-                                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                                          </svg>
+                                          <CopyIcon size={14} />
                                         </button>
                                       </span>
                                     </th>
@@ -2922,12 +2248,7 @@ export function App() {
                             {selectedItem ? (() => {
                               const parsedResp = parseItemResponse(selectedItem.response);
                               const respHeaderEntries = Object.entries(parsedResp.headers);
-                              const copyIcon = (
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                                </svg>
-                              );
+                              const copyIcon = <CopyIcon />;
                               return (
                               <div className="inspector-sections">
                                 <div className="inspector-meta">
@@ -2947,7 +2268,7 @@ export function App() {
                                   <div className="inspector-block-header">
                                     <span>Request</span>
                                     <button type="button" className="copy-col-btn" title="Copy request"
-                                      onClick={() => { void navigator.clipboard.writeText(formatStructuredValue(selectedItem.request)); flashCopied("Request copied!"); }}>
+                                      onClick={() => { void navigator.clipboard.writeText(formatStructuredValue(selectedItem.request)); flash("Request copied!"); }}>
                                       {copyIcon}
                                     </button>
                                   </div>
@@ -2957,7 +2278,7 @@ export function App() {
                                   <div className="inspector-block-header">
                                     <span>Response body</span>
                                     <button type="button" className="copy-col-btn" title="Copy response"
-                                      onClick={() => { void navigator.clipboard.writeText(formatStructuredValue(parsedResp.body)); flashCopied("Response copied!"); }}>
+                                      onClick={() => { void navigator.clipboard.writeText(formatStructuredValue(parsedResp.body)); flash("Response copied!"); }}>
                                       {copyIcon}
                                     </button>
                                   </div>
@@ -2968,7 +2289,7 @@ export function App() {
                                     <div className="inspector-block-header">
                                       <span>Response headers</span>
                                       <button type="button" className="copy-col-btn" title="Copy headers"
-                                        onClick={() => { void navigator.clipboard.writeText(respHeaderEntries.map(([k, v]) => `${k}: ${v}`).join("\n")); flashCopied("Headers copied!"); }}>
+                                        onClick={() => { void navigator.clipboard.writeText(respHeaderEntries.map(([k, v]) => `${k}: ${v}`).join("\n")); flash("Headers copied!"); }}>
                                         {copyIcon}
                                       </button>
                                     </div>
@@ -2987,7 +2308,7 @@ export function App() {
                                     <div className="inspector-block-header">
                                       <span>Error</span>
                                       <button type="button" className="copy-col-btn" title="Copy error"
-                                        onClick={() => { void navigator.clipboard.writeText(selectedItem.lastError ?? ""); flashCopied("Error copied!"); }}>
+                                        onClick={() => { void navigator.clipboard.writeText(selectedItem.lastError ?? ""); flash("Error copied!"); }}>
                                         {copyIcon}
                                       </button>
                                     </div>
@@ -3052,10 +2373,7 @@ export function App() {
                   ) : (
                     <div className="empty-workspace">
                       <div className="empty-workspace-icon">
-                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <line x1="22" y1="2" x2="11" y2="13" />
-                          <polygon points="22 2 15 22 11 13 2 9 22 2" />
-                        </svg>
+                        <SendIcon />
                       </div>
                       <div>
                         <p className="empty-workspace-label">Ready to send</p>
@@ -3087,13 +2405,7 @@ export function App() {
         ) : (
           <div className="empty-workspace">
             <div className="empty-workspace-icon">
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                {tabs.length === 0 ? (
-                  <><rect x="2" y="3" width="20" height="14" rx="2" ry="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></>
-                ) : (
-                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                )}
-              </svg>
+              {tabs.length === 0 ? <MonitorIcon /> : <FolderIcon size={28} />}
             </div>
             <div>
               {tabs.length === 0 ? (
